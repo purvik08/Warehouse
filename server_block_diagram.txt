@@ -1,19 +1,19 @@
-Block Diagram for ESP32 used as a server
+Block Diagram for ESP32-S3 used as a server
 
                        +---------------------+
-                       |       ESP32         |
+                       |      ESP32-S3       |
                        |                     |
                        |                     |
 +---------------+      |                     |      +-------------------+
-| RFID (MFRC522)|----->| GPIO5 (SS)          |      |  SD Card          |
-|               |      |                     |<---->| CLK=14,CMD=15     |
-| SCK,MOSI,MISO |<---->| SPI (18,23,19)      |      | DATA0=2,DATA1=4   |
+| RFID (MFRC522)|----->| GPIO5 (SS)          |      |  LittleFS         |
+|               |      |                     |<---->|  (Internal Flash) |
+| SCK,MOSI,MISO |<---->| SPI (18,23,19)      |      |                   |
 +---------------+      |                     |      +-------------------+
                        |                     |
-+---------------+      |                     |      +-------------------+
-|  Nano Serial  |<---->| GPIO13 (RX)         |      |  WiFi AP          |
-|  (Robotic Arm)|----> | GPIO12 (TX)         |<---->|  (Internal)       |
-+---------------+      |                     |      +-------------------+
+                       |                     |      +-------------------+
+                       |                     |      |  WiFi AP          |
+                       |                     |<---->|  (Internal)       |
+                       |                     |      +-------------------+
                        |                     |
 +---------------+      |                     |
 |  Status LEDs  |<---->| GPIO25 (Red)        |

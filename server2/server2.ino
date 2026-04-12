@@ -3,9 +3,21 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
-#include "FS.h"
-#include "SD_MMC.h"
+#include <LittleFS.h>
+#include <ElegantOTA.h>
 #include <MFRC522.h>
+
+#define DEBUG 1
+
+#if DEBUG
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
+#endif
 #include <SPI.h>
 #include <vector>
 #include <algorithm> // for std::find
@@ -14,9 +26,7 @@
 #define RST_PIN 0
 MFRC522 rfid(SS_PIN, RST_PIN);
 
-#define SERIAL_RX 13
-#define SERIAL_TX 12
-HardwareSerial NanoSerial(1);
+
 
 #define DB_DIR "/db"
 #define CONFIG_FILE DB_DIR "/config.json"
@@ -33,8 +43,6 @@ std::vector<String> connectedDevices;
 
 struct {
   String teamName = "Team Lakshya";
-  int lineFollowers = 3;
-  int roboticArms = 1;
 } config;
 
 struct Inventory {
@@ -86,39 +94,20 @@ int getRackAvailableCapacity(String rack) {
   return 0;
 }
 
-void initializeSD() {
-  Serial.println("Initializing SD card...");
+void initializeStorage() {
+  DEBUG_PRINTLN("Initializing LittleFS...");
 
-  if (!SD_MMC.begin()) {
-    Serial.println("SD Card Mount Failed");
-    Serial.println("Check: ");
-    Serial.println("1. Is card inserted?");
-    Serial.println("2. Is it formatted as FAT32?");
-    Serial.println("3. Are pins properly connected?");
+  if (!LittleFS.begin(true)) {
+    DEBUG_PRINTLN("LittleFS Mount Failed");
     return;
   }
+  DEBUG_PRINTLN("LittleFS mounted successfully");
 
-  Serial.println("SD Card mounted successfully");
-
-  uint8_t cardType = SD_MMC.cardType();
-
-  if(cardType == CARD_NONE) {
-    Serial.println("No SD card attached");
-    return;
-  }
-  
-  Serial.print("SD Card Type: ");
-
-  if(cardType == CARD_MMC) Serial.println("MMC");
-  else if(cardType == CARD_SD) Serial.println("SDSC");
-  else if(cardType == CARD_SDHC) Serial.println("SDHC");
-  else Serial.println("UNKNOWN");
-
-  if (!SD_MMC.exists(DB_DIR)) SD_MMC.mkdir(DB_DIR);
-  if (!SD_MMC.exists(CONFIG_FILE)) saveConfig(); else loadConfig();
-  if (!SD_MMC.exists(INVENTORY_FILE)) saveInventory(); else loadInventory();
-  if (!SD_MMC.exists(TRANSACTIONS_FILE)) appendToFile(TRANSACTIONS_FILE, "timestamp,event,robot,location,box\n");
-  if (!SD_MMC.exists(RFID_LOGS_FILE)) appendToFile(RFID_LOGS_FILE, "timestamp,tag,location\n");
+  if (!LittleFS.exists(DB_DIR)) LittleFS.mkdir(DB_DIR);
+  if (!LittleFS.exists(CONFIG_FILE)) saveConfig(); else loadConfig();
+  if (!LittleFS.exists(INVENTORY_FILE)) saveInventory(); else loadInventory();
+  if (!LittleFS.exists(TRANSACTIONS_FILE)) appendToFile(TRANSACTIONS_FILE, "timestamp,event,robot,location,box\n");
+  if (!LittleFS.exists(RFID_LOGS_FILE)) appendToFile(RFID_LOGS_FILE, "timestamp,tag,location\n");
 }
 
 void saveDatabase() {
@@ -127,29 +116,25 @@ void saveDatabase() {
 }
 
 void saveConfig() {
-  File file = SD_MMC.open(CONFIG_FILE, FILE_WRITE);
+  File file = LittleFS.open(CONFIG_FILE, FILE_WRITE);
   if (!file) return;
   DynamicJsonDocument doc(256);
   doc["team"] = config.teamName;
-  doc["lineFollowers"] = config.lineFollowers;
-  doc["roboticArms"] = config.roboticArms;
   serializeJson(doc, file);
   file.close();
 }
 
 void loadConfig() {
-  File file = SD_MMC.open(CONFIG_FILE, FILE_READ);
+  File file = LittleFS.open(CONFIG_FILE, FILE_READ);
   if (!file) return;
   DynamicJsonDocument doc(256);
   deserializeJson(doc, file);
   config.teamName = doc["team"] | "Team Lakshya";
-  config.lineFollowers = doc["lineFollowers"] | 3;
-  config.roboticArms = doc["roboticArms"] | 1;
   file.close();
 }
 
 void saveInventory() {
-  File file = SD_MMC.open(INVENTORY_FILE, FILE_WRITE);
+  File file = LittleFS.open(INVENTORY_FILE, FILE_WRITE);
   if (!file) return;
   DynamicJsonDocument doc(256);
   doc["rackA"] = inventory.rackA;
@@ -160,7 +145,7 @@ void saveInventory() {
 }
 
 void loadInventory() {
-  File file = SD_MMC.open(INVENTORY_FILE, FILE_READ);
+  File file = LittleFS.open(INVENTORY_FILE, FILE_READ);
   if (!file) return;
   DynamicJsonDocument doc(256);
   deserializeJson(doc, file);
@@ -171,13 +156,13 @@ void loadInventory() {
 }
 
 void appendToFile(String filename, String data) {
-  File file = SD_MMC.open(filename, FILE_APPEND);
+  File file = LittleFS.open(filename, FILE_APPEND);
   if (!file) {
-    Serial.println("Failed to open file: " + filename);
+    DEBUG_PRINTLN("Failed to open file: " + filename);
     return;
   }
   if (!file.print(data)) {
-    Serial.println("Write failed: " + filename);
+    DEBUG_PRINTLN("Write failed: " + filename);
   }
   file.close();
 }
@@ -263,11 +248,11 @@ void processArmMessage(String message) {
 
 void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
   // Debug header
-  Serial.printf("[WebSocket][Client %u] Event: ", num);
+  DEBUG_PRINTF("[WebSocket][Client %u] Event: ", num);
   
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.println("Disconnected");
+      DEBUG_PRINTLN("Disconnected");
       // Remove from connected devices list
       connectedDevices.erase(std::remove_if(connectedDevices.begin(), 
                                           connectedDevices.end(),
@@ -278,7 +263,7 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
       break;
 
     case WStype_CONNECTED: {
-      Serial.println("Connected");
+      DEBUG_PRINTLN("Connected");
       // Send initial configuration
       DynamicJsonDocument doc(256);
       doc["type"] = "config";
@@ -290,37 +275,37 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
     }
 
     case WStype_TEXT: {
-      Serial.println("Text Message Received");
+      DEBUG_PRINTLN("Text Message Received");
       // Sandbox message processing
       if (length > 512) {  // Prevent overly large messages
-        Serial.println("Message too large, rejecting");
+        DEBUG_PRINTLN("Message too large, rejecting");
         webSocket.sendTXT(num, "{\"error\":\"message_too_large\"}");
         break;
       }
 
       String message = (char*)payload;
-      Serial.println("Raw message: " + message);
+      DEBUG_PRINTLN("Raw message: " + message);
 
       // Safe JSON parsing
       DynamicJsonDocument doc(512);
       DeserializationError error = deserializeJson(doc, message);
       
       if (error) {
-        Serial.print("JSON parse error: ");
-        Serial.println(error.c_str());
+        DEBUG_PRINT("JSON parse error: ");
+        DEBUG_PRINTLN(error.c_str());
         webSocket.sendTXT(num, "{\"error\":\"invalid_json\"}");
         break;
       }
 
       // Message type validation
       if (!doc.containsKey("type")) {
-        Serial.println("Missing message type");
+        DEBUG_PRINTLN("Missing message type");
         webSocket.sendTXT(num, "{\"error\":\"missing_type\"}");
         break;
       }
 
       String msgType = doc["type"].as<String>();
-      Serial.println("Processing message type: " + msgType);
+      DEBUG_PRINTLN("Processing message type: " + msgType);
 
       // Process different message types
       if (msgType == "command") {
@@ -331,11 +316,11 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
         }
         
         String command = doc["command"].as<String>();
-        Serial.println("Executing command: " + command);
+        DEBUG_PRINTLN("Executing command: " + command);
         
         // Send to robotic arm with validation
         if (command == "pick" || command == "place" || command == "home") {
-          NanoSerial.println(command);
+          notifyRobot("Arm-01", command, "");
           webSocket.sendTXT(num, "{\"status\":\"command_sent\"}");
         } else {
           webSocket.sendTXT(num, "{\"error\":\"invalid_command\"}");
@@ -346,30 +331,30 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
     }
 
     case WStype_BIN:
-      Serial.printf("Binary message length: %u\n", length);
+      DEBUG_PRINTF("Binary message length: %u\n", length);
       // Echo back binary data for testing
       webSocket.sendBIN(num, payload, length);
       break;
 
     case WStype_ERROR:
-      Serial.printf("Error: %u\n", *payload);
+      DEBUG_PRINTF("Error: %u\n", *payload);
       break;
 
     case WStype_PING:
-      Serial.println("Ping received");
+      DEBUG_PRINTLN("Ping received");
       break;
 
     case WStype_PONG:
-      Serial.println("Pong received");
+      DEBUG_PRINTLN("Pong received");
       break;
 
     default:
-      Serial.printf("Unhandled event type: %u\n", type);
+      DEBUG_PRINTF("Unhandled event type: %u\n", type);
       break;
   }
 
   // Debug footer
-  Serial.printf("[WebSocket][Client %u] Free Heap: %u bytes\n", 
+  DEBUG_PRINTF("[WebSocket][Client %u] Free Heap: %u bytes\n", 
                num, ESP.getFreeHeap());
 }
 
@@ -390,8 +375,6 @@ void handleSettingsUpdate() {
 
   // Update configuration
   if (doc.containsKey("team")) config.teamName = doc["team"].as<String>();
-  if (doc.containsKey("lineFollowers")) config.lineFollowers = doc["lineFollowers"];
-  if (doc.containsKey("roboticArms")) config.roboticArms = doc["roboticArms"];
 
   // Save to SD card
   saveConfig();
@@ -402,8 +385,13 @@ void handleSettingsUpdate() {
 void handleStatus() {
   DynamicJsonDocument doc(512);
   doc["team"] = config.teamName;
-  doc["lineFollowers"] = config.lineFollowers;
-  doc["roboticArms"] = config.roboticArms;
+  int lf_ct = 0, arm_ct = 0;
+  for (const String &d : connectedDevices) {
+    if(d.startsWith("LF-")) lf_ct++;
+    if(d.startsWith("Arm")) arm_ct++;
+  }
+  doc["lineFollowers"] = lf_ct;
+  doc["roboticArms"] = arm_ct;
   
   JsonObject inv = doc.createNestedObject("inventory");
   inv["rackA"] = inventory.rackA;
@@ -426,7 +414,7 @@ void handleRobotStatusUpdate() {
     return;
   }
 
-  Serial.println("[Server] Received robot status update");
+  DEBUG_PRINTLN("[Server] Received robot status update");
   
   DynamicJsonDocument doc(512);
   DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -435,12 +423,22 @@ void handleRobotStatusUpdate() {
     server.send(400, "text/plain", "Invalid JSON");
     return;
   }
+  
+  String deviceName = "";
+  if (doc.containsKey("robot")) deviceName = doc["robot"].as<String>();
+  else if (doc.containsKey("device")) deviceName = doc["device"].as<String>();
+  
+  if (deviceName != "") {
+    if (std::find(connectedDevices.begin(), connectedDevices.end(), deviceName) == connectedDevices.end()) {
+      connectedDevices.push_back(deviceName);
+    }
+  }
 
   // Log received data for debugging
-  Serial.print("Robot: ");
-  Serial.println(doc["robot"].as<String>());
-  Serial.print("Location: ");
-  Serial.println(doc["location"].as<String>());
+  DEBUG_PRINT("Robot: ");
+  DEBUG_PRINTLN(doc["robot"].as<String>());
+  DEBUG_PRINT("Location: ");
+  DEBUG_PRINTLN(doc["location"].as<String>());
   
   // Send success response
   server.send(200, "application/json", "{\"status\":\"updated\"}");
@@ -458,13 +456,13 @@ void handleCommand() {
     return;
   }
   String command = server.arg("plain");
-  Serial.println("Sending to arm: " + command);
-  NanoSerial.println(command);
+  DEBUG_PRINTLN("Sending to arm: " + command);
+  notifyRobot("Arm-01", command, "");
   server.send(200, "application/json", "{\"status\":\"command_sent\"}");
 }
 
 void handleDatabaseDownload() {
-  if(!SD_MMC.exists(DB_DIR)) {
+  if(!LittleFS.exists(DB_DIR)) {
     server.send(404, "text/plain", "Database not found");
     return;
   }
@@ -472,7 +470,7 @@ void handleDatabaseDownload() {
   server.sendHeader("Content-Disposition", "attachment; filename=warehouse_db.zip");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "application/octet-stream", "");
-  File dir = SD_MMC.open(DB_DIR);
+  File dir = LittleFS.open(DB_DIR);
   File file = dir.openNextFile();
   while(file){
     if(!file.isDirectory()){
@@ -546,122 +544,111 @@ void serveWebInterface() {
   <!DOCTYPE html>
   <html>
   <head>
-    <title>Warehouse Automation</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+      :root {
+        --bg-dark: #0f172a;
+        --bg-card: rgba(30, 41, 59, 0.7);
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0ea5e9;
+        --success: #10b981;
+        --danger: #ef4444;
+        --border: rgba(255, 255, 255, 0.1);
+      }
       body { 
-        font-family: Arial; 
+        font-family: system-ui, -apple-system, sans-serif; 
         margin: 0; 
         padding: 0; 
-        background: #f5f5f5; 
+        background-color: var(--bg-dark); 
+        color: var(--text-main);
+        min-height: 100vh;
       }
       header { 
-        background: #333; 
-        color: #fff; 
-        padding: 1em; 
+        padding: 2rem; 
         text-align: center; 
+        background: linear-gradient(to right, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.9));
+        border-bottom: 1px solid var(--border);
       }
+      h1, h2 { margin: 0 0 1rem 0; font-weight: 600; }
+      h1 { background: -webkit-linear-gradient(45deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
       nav { 
-        display: flex; 
-        background: #444; 
-        flex-wrap: wrap;
+        display: flex; justify-content: center; gap: 1rem; padding: 1rem;
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; flex-wrap: wrap;
       }
       nav a {
-        flex: 1;
-        padding: 1em;
-        background: #444;
-        color: white;
-        text-align: center;
-        text-decoration: none;
-        min-width: 120px;
+        color: var(--text-muted); text-decoration: none; padding: 0.75rem 1.5rem;
+        border-radius: 8px; font-weight: 500; transition: all 0.3s ease; border: 1px solid transparent;
       }
       nav a:hover, nav a.active { 
-        background: #666; 
+        color: #fff; background: rgba(56, 189, 248, 0.1);
+        border: 1px solid var(--accent); box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
       }
-      section { 
-        padding: 1em; 
-      }
-      .dashboard-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 1em;
-      }
+      section { padding: 2rem; max-width: 1200px; margin: 0 auto; }
       .card {
-        background: white;
-        border-radius: 5px;
-        padding: 1em;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem;
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); transition: transform 0.3s ease;
       }
+      .card:hover { transform: translateY(-5px); }
+      
+      .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+      .status-item:last-child { border-bottom: none; }
+      .status-value { font-weight: bold; color: var(--accent); font-size: 1.2rem; }
+      
+      button {
+        background: linear-gradient(135deg, var(--accent), var(--accent-hover)); border: none;
+        padding: 0.75rem 1.5rem; color: white; font-weight: 600; border-radius: 8px; cursor: pointer;
+        transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+      }
+      button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(56, 189, 248, 0.5); }
+      
+      input {
+        width: 100%; padding: 1rem; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border);
+        border-radius: 8px; color: white; box-sizing: border-box; transition: all 0.3s ease;
+      }
+      input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+      
       .log { 
-        font-family: monospace; 
-        white-space: pre-wrap; 
-        background: #eee; 
-        padding: 0.5em;
-        max-height: 300px;
-        overflow-y: auto;
-      }
-      .status-item {
-        margin-bottom: 0.5em;
-      }
-      .status-value {
-        font-weight: bold;
+        font-family: 'Courier New', Courier, monospace; font-size: 0.9rem;
+        white-space: pre-wrap; background: #000; color: #10b981; padding: 1rem;
+        border-radius: 8px; max-height: 300px; overflow-y: auto; border: 1px solid #333;
       }
     </style>
   </head>
   <body>
-    <header>
-      <h1>Warehouse Automation - %TEAM_NAME%</h1>
-    </header>
+
+    <header><h1>Warehouse Automation - %TEAM_NAME%</h1></header>
     <nav>
       <a href="/" class="active">Dashboard</a>
       <a href="/inventory">Inventory</a>
       <a href="/robot">Robot</a>
       <a href="/settings">Settings</a>
     </nav>
-
     <section>
-      <div class="dashboard-grid">
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 2rem;">
         <div class="card">
           <h2>System Status</h2>
-          <div class="status-item">
-            <span>Connected Devices: </span>
-            <span class="status-value" id="deviceCount">0</span>
-          </div>
-          <div class="status-item">
-            <span>Line Followers: </span>
-            <span class="status-value">%LINE_FOLLOWERS%</span>
-          </div>
-          <div class="status-item">
-            <span>Robotic Arms: </span>
-            <span class="status-value">%ROBOTIC_ARMS%</span>
-          </div>
-          <div class="status-item">
-            <span>Free Memory: </span>
-            <span class="status-value" id="freeMemory">-</span>
-          </div>
+          <div class="status-item"><span>Connected Devices</span><span class="status-value" id="deviceCount">0</span></div>
+          <div class="status-item"><span>Line Followers</span><span class="status-value">%LINE_FOLLOWERS%</span></div>
+          <div class="status-item"><span>Robotic Arms</span><span class="status-value">%ROBOTIC_ARMS%</span></div>
+          <div class="status-item"><span>Free Memory</span><span class="status-value" id="freeMemory">-</span></div>
         </div>
-
         <div class="card">
           <h2>Quick Inventory</h2>
-          <div class="status-item">
-            <span>Rack A: </span>
-            <span class="status-value" id="rackA-status">%RACKA_COUNT%/%RACKA_CAPACITY%</span>
-          </div>
-          <div class="status-item">
-            <span>Rack B: </span>
-            <span class="status-value" id="rackB-status">%RACKB_COUNT%/%RACKB_CAPACITY%</span>
-          </div>
-          <div class="status-item">
-            <span>Rack C: </span>
-            <span class="status-value" id="rackC-status">%RACKC_COUNT%/%RACKC_CAPACITY%</span>
-          </div>
+          <div class="status-item"><span>Rack A</span><span class="status-value" id="rackA-status">%RACKA_COUNT%/%RACKA_CAPACITY%</span></div>
+          <div class="status-item"><span>Rack B</span><span class="status-value" id="rackB-status">%RACKB_COUNT%/%RACKB_CAPACITY%</span></div>
+          <div class="status-item"><span>Rack C</span><span class="status-value" id="rackC-status">%RACKC_COUNT%/%RACKC_CAPACITY%</span></div>
         </div>
       </div>
-
-      <div class="card" style="margin-top: 1em;">
-        <h2>Live Logs</h2>
+      <div class="card" style="margin-top: 2rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <h2 style="margin: 0;">Live Network Logs</h2>
+          <button onclick="clearLogs()" style="border-radius: 20px; padding: 0.5rem 1rem;">Clear</button>
+        </div>
         <div class="log" id="logOutput"></div>
-        <button onclick="clearLogs()" style="margin-top: 0.5em;">Clear Logs</button>
       </div>
     </section>
 
@@ -669,118 +656,59 @@ void serveWebInterface() {
     let ws;
     let logOutput = document.getElementById('logOutput');
 
-    // Initialize WebSocket connection
     function connectWebSocket() {
       ws = new WebSocket(`ws://${location.hostname}:81`);
-      
-      ws.onopen = () => {
-        log("Connected to WebSocket server");
-      };
-      
-      ws.onmessage = (event) => {
+      ws.onopen = () => log("Network connection established.");
+      ws.onmessage = (e) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'rfid') {
-            log("RFID Tag: " + data.tag);
-          } else if (data.type === 'inventory') {
-            updateInventoryStatus(data);
-            log("Inventory updated");
-          } else if (data.type === 'location') {
-            log("Location Tag: " + data.tag);
-          } else if (data.type === 'arm') {
-            log("Arm Event: " + JSON.stringify(data));
-          } else if (data.type === 'status') {
-            updateDeviceStatus(data);
-          }
-        } catch (e) {
-          log("Received: " + event.data);
-        }
+          const d = JSON.parse(e.data);
+          if (d.type === 'rfid') log(">>> RFID Tag: " + d.tag);
+          else if (d.type === 'inventory') { updateInventoryStatus(d); log(">>> Grid Inventory Sync."); }
+          else if (d.type === 'location') log(">>> Localization Ping: " + d.tag);
+          else if (d.type === 'arm') log(">>> Arm Event: " + JSON.stringify(d));
+          else if (d.type === 'status') updateDeviceStatus(d);
+        } catch (err) { log("RAW: " + e.data); }
       };
-      
-      ws.onclose = () => {
-        log("WebSocket disconnected. Reconnecting...");
-        setTimeout(connectWebSocket, 3000);
-      };
-      
-      ws.onerror = (error) => {
-        log("WebSocket error: " + error);
-      };
+      ws.onclose = () => { log("Connection lost. Reconnecting..."); setTimeout(connectWebSocket, 3000); };
     }
 
-    function log(message) {
-      const timestamp = new Date().toLocaleTimeString();
-      logOutput.textContent += `[${timestamp}] ${message}\n`;
+    function log(msg) {
+      logOutput.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
       logOutput.scrollTop = logOutput.scrollHeight;
     }
-
-    function clearLogs() {
-      logOutput.textContent = '';
-    }
+    function clearLogs() { logOutput.textContent = ''; }
 
     function updateInventoryStatus(data) {
-      if (data.rackA !== undefined) {
-        document.getElementById('rackA-status').textContent = 
-          `${data.rackA}/%RACKA_CAPACITY%`;
-      }
-      if (data.rackB !== undefined) {
-        document.getElementById('rackB-status').textContent = 
-          `${data.rackB}/%RACKB_CAPACITY%`;
-      }
-      if (data.rackC !== undefined) {
-        document.getElementById('rackC-status').textContent = 
-          `${data.rackC}/%RACKC_CAPACITY%`;
-      }
+      if(data.rackA !== undefined) document.getElementById('rackA-status').textContent = `${data.rackA}/%RACKA_CAPACITY%`;
+      if(data.rackB !== undefined) document.getElementById('rackB-status').textContent = `${data.rackB}/%RACKB_CAPACITY%`;
+      if(data.rackC !== undefined) document.getElementById('rackC-status').textContent = `${data.rackC}/%RACKC_CAPACITY%`;
     }
 
     function updateDeviceStatus(data) {
-      if (data.connectedDevices) {
-        document.getElementById('deviceCount').textContent = 
-          data.connectedDevices.length;
-      }
-      if (data.freeHeap) {
-        document.getElementById('freeMemory').textContent = 
-          Math.round(data.freeHeap/1024) + " KB";
-      }
+      if(data.connectedDevices) document.getElementById('deviceCount').textContent = data.connectedDevices.length;
+      if(data.freeHeap) document.getElementById('freeMemory').textContent = Math.round(data.freeHeap/1024) + " KB";
     }
 
-    // Periodically fetch system status
     function fetchStatus() {
-      fetch('/api/status')
-        .then(res => res.json())
-        .then(data => {
-          updateDeviceStatus(data);
-          updateInventoryStatus(data.inventory);
-        })
-        .catch(err => log("Status fetch error: " + err));
+      fetch('/api/status').then(res => res.json()).then(data => {
+        updateDeviceStatus(data); updateInventoryStatus(data.inventory);
+      }).catch(err => log("Status fetch error: " + err));
     }
-
-    // Highlight current page in navigation
-    function setActiveNav() {
-      const path = window.location.pathname;
-      const navLinks = document.querySelectorAll('nav a');
-      navLinks.forEach(link => {
-        link.classList.remove('active');
-        if (link.getAttribute('href') === path) {
-          link.classList.add('active');
-        }
-      });
-    }
-
-    // Initialize
-    window.onload = () => {
-      connectWebSocket();
-      setActiveNav();
-      fetchStatus();
-      setInterval(fetchStatus, 5000);
-    };
+    
+    window.onload = () => { connectWebSocket(); fetchStatus(); setInterval(fetchStatus, 5000); };
   </script>
   </body>
   </html>
   )rawliteral";
 
   html.replace("%TEAM_NAME%", config.teamName);
-  html.replace("%LINE_FOLLOWERS%", String(config.lineFollowers));
-  html.replace("%ROBOTIC_ARMS%", String(config.roboticArms));
+  int lf_cnt = 0, arm_cnt = 0;
+  for(auto &d : connectedDevices){
+    if(d.startsWith("LF-")) lf_cnt++;
+    if(d.startsWith("Arm")) arm_cnt++;
+  }
+  html.replace("%LINE_FOLLOWERS%", String(lf_cnt));
+  html.replace("%ROBOTIC_ARMS%", String(arm_cnt));
   html.replace("%RACKA_COUNT%", String(inventory.rackA));
   html.replace("%RACKA_CAPACITY%", String(inventory.rackACapacity));
   html.replace("%RACKB_COUNT%", String(inventory.rackB));
@@ -805,88 +733,131 @@ void serveRobotPage() {
   <!DOCTYPE html>
   <html>
   <head>
-    <title>Robot Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-      body { font-family: Arial; margin: 20px; }
-      .control-panel { 
-        border: 1px solid #ddd;
-        padding: 20px;
-        border-radius: 5px;
-        max-width: 500px;
+      :root {
+        --bg-dark: #0f172a;
+        --bg-card: rgba(30, 41, 59, 0.7);
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0ea5e9;
+        --success: #10b981;
+        --danger: #ef4444;
+        --border: rgba(255, 255, 255, 0.1);
       }
+      body { 
+        font-family: system-ui, -apple-system, sans-serif; 
+        margin: 0; 
+        padding: 0; 
+        background-color: var(--bg-dark); 
+        color: var(--text-main);
+        min-height: 100vh;
+      }
+      header { 
+        padding: 2rem; 
+        text-align: center; 
+        background: linear-gradient(to right, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.9));
+        border-bottom: 1px solid var(--border);
+      }
+      h1, h2 { margin: 0 0 1rem 0; font-weight: 600; }
+      h1 { background: -webkit-linear-gradient(45deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+      nav { 
+        display: flex; justify-content: center; gap: 1rem; padding: 1rem;
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; flex-wrap: wrap;
+      }
+      nav a {
+        color: var(--text-muted); text-decoration: none; padding: 0.75rem 1.5rem;
+        border-radius: 8px; font-weight: 500; transition: all 0.3s ease; border: 1px solid transparent;
+      }
+      nav a:hover, nav a.active { 
+        color: #fff; background: rgba(56, 189, 248, 0.1);
+        border: 1px solid var(--accent); box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+      }
+      section { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+      .card {
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem;
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); transition: transform 0.3s ease;
+      }
+      .card:hover { transform: translateY(-5px); }
+      
+      .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+      .status-item:last-child { border-bottom: none; }
+      .status-value { font-weight: bold; color: var(--accent); font-size: 1.2rem; }
+      
       button {
-        padding: 10px 15px;
-        margin: 5px;
-        background-color: #4CAF50;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
+        background: linear-gradient(135deg, var(--accent), var(--accent-hover)); border: none;
+        padding: 0.75rem 1.5rem; color: white; font-weight: 600; border-radius: 8px; cursor: pointer;
+        transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
       }
-      button:hover { background-color: #45a049; }
-      #commandLog {
-        margin-top: 20px;
-        border: 1px solid #ddd;
-        padding: 10px;
-        height: 200px;
-        overflow-y: scroll;
+      button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(56, 189, 248, 0.5); }
+      
+      input {
+        width: 100%; padding: 1rem; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border);
+        border-radius: 8px; color: white; box-sizing: border-box; transition: all 0.3s ease;
+      }
+      input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+      
+      .log { 
+        font-family: 'Courier New', Courier, monospace; font-size: 0.9rem;
+        white-space: pre-wrap; background: #000; color: #10b981; padding: 1rem;
+        border-radius: 8px; max-height: 300px; overflow-y: auto; border: 1px solid #333;
       }
     </style>
   </head>
   <body>
-    <h1>Robotic Arm Control</h1>
-    
-    <div class="control-panel">
-      <h2>Quick Commands</h2>
-      <button onclick="sendCommand('pick')">Pick Item</button>
-      <button onclick="sendCommand('place')">Place Item</button>
-      <button onclick="sendCommand('home')">Return Home</button>
-      
-      <h2>Custom Command</h2>
-      <input type="text" id="customCommand" placeholder="Enter command">
-      <button onclick="sendCustomCommand()">Send</button>
-      
-      <div id="commandLog"></div>
-    </div>
+
+    <header><h1>Robotic Arm Console</h1></header>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/inventory">Inventory</a>
+      <a href="/robot" class="active">Robot</a>
+      <a href="/settings">Settings</a>
+    </nav>
+    <section>
+      <div class="card" style="max-width: 600px; margin: 0 auto;">
+        <h2>Command Matrix</h2>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem;">
+          <button onclick="sendCommand('pick')" style="padding: 1.5rem; font-size: 1.1rem;">Pick Item</button>
+          <button onclick="sendCommand('place')" style="padding: 1.5rem; font-size: 1.1rem;">Place Item</button>
+          <button onclick="sendCommand('home')" style="grid-column: span 2; padding: 1.5rem; background: linear-gradient(135deg, #8b5cf6, #d946ef);">Return Home</button>
+        </div>
+        
+        <h2>Terminal Injection</h2>
+        <div style="display: flex; gap: 1rem; margin-bottom: 2rem;">
+          <input type="text" id="customCommand" placeholder="Enter remote instruction snippet...">
+          <button onclick="sendCustomCommand()">Execute</button>
+        </div>
+        
+        <h2>Arm Telemetry</h2>
+        <div id="commandLog" class="log" style="height: 150px;"></div>
+      </div>
+    </section>
 
     <script>
       function sendCommand(cmd) {
-        fetch('/api/command', {
-          method: 'POST',
-          body: cmd
-        })
-        .then(response => {
-          logMessage(`Command sent: ${cmd}`);
-        })
-        .catch(error => {
-          logMessage(`Error: ${error}`);
-        });
+        fetch('/api/command', { method: 'POST', body: cmd })
+        .then(() => logMessage(`Tx -> ${cmd}`))
+        .catch(err => logMessage(`ERR -> ${err}`));
       }
 
       function sendCustomCommand() {
-        const cmd = document.getElementById('customCommand').value;
-        if(cmd.trim() !== '') {
-          sendCommand(cmd);
-          document.getElementById('customCommand').value = '';
-        }
+        const i = document.getElementById('customCommand');
+        if(i.value.trim()){ sendCommand(i.value); i.value = ''; }
       }
 
       function logMessage(msg) {
-        const log = document.getElementById('commandLog');
-        const entry = document.createElement('div');
-        entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-        log.appendChild(entry);
-        log.scrollTop = log.scrollHeight;
+        const l = document.getElementById('commandLog');
+        l.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+        l.scrollTop = l.scrollHeight;
       }
 
-      // WebSocket for receiving arm status updates
       const ws = new WebSocket(`ws://${location.hostname}:81`);
-      
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if(data.type === 'arm') {
-          logMessage(`Arm status: ${JSON.stringify(data)}`);
-        }
+      ws.onmessage = (e) => {
+        const d = JSON.parse(e.data);
+        if(d.type === 'arm' || d.type === 'notification') logMessage(`Rx <- ${JSON.stringify(d)}`);
       };
     </script>
   </body>
@@ -901,103 +872,122 @@ void serveSettingsPage() {
   <!DOCTYPE html>
   <html>
   <head>
-    <title>System Settings</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-      body { font-family: Arial; margin: 20px; }
-      .settings-form { 
-        border: 1px solid #ddd;
-        padding: 20px;
-        border-radius: 5px;
-        max-width: 500px;
+      :root {
+        --bg-dark: #0f172a;
+        --bg-card: rgba(30, 41, 59, 0.7);
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0ea5e9;
+        --success: #10b981;
+        --danger: #ef4444;
+        --border: rgba(255, 255, 255, 0.1);
       }
-      .form-group {
-        margin-bottom: 15px;
+      body { 
+        font-family: system-ui, -apple-system, sans-serif; 
+        margin: 0; 
+        padding: 0; 
+        background-color: var(--bg-dark); 
+        color: var(--text-main);
+        min-height: 100vh;
       }
-      label {
-        display: block;
-        margin-bottom: 5px;
-        font-weight: bold;
+      header { 
+        padding: 2rem; 
+        text-align: center; 
+        background: linear-gradient(to right, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.9));
+        border-bottom: 1px solid var(--border);
       }
-      input, select {
-        width: 100%;
-        padding: 8px;
-        box-sizing: border-box;
+      h1, h2 { margin: 0 0 1rem 0; font-weight: 600; }
+      h1 { background: -webkit-linear-gradient(45deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+      nav { 
+        display: flex; justify-content: center; gap: 1rem; padding: 1rem;
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; flex-wrap: wrap;
       }
+      nav a {
+        color: var(--text-muted); text-decoration: none; padding: 0.75rem 1.5rem;
+        border-radius: 8px; font-weight: 500; transition: all 0.3s ease; border: 1px solid transparent;
+      }
+      nav a:hover, nav a.active { 
+        color: #fff; background: rgba(56, 189, 248, 0.1);
+        border: 1px solid var(--accent); box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+      }
+      section { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+      .card {
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem;
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); transition: transform 0.3s ease;
+      }
+      .card:hover { transform: translateY(-5px); }
+      
+      .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+      .status-item:last-child { border-bottom: none; }
+      .status-value { font-weight: bold; color: var(--accent); font-size: 1.2rem; }
+      
       button {
-        padding: 10px 15px;
-        background-color: #4CAF50;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
+        background: linear-gradient(135deg, var(--accent), var(--accent-hover)); border: none;
+        padding: 0.75rem 1.5rem; color: white; font-weight: 600; border-radius: 8px; cursor: pointer;
+        transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
       }
-      button:hover { background-color: #45a049; }
-      #statusMessage {
-        margin-top: 15px;
-        padding: 10px;
-        border-radius: 4px;
-        display: none;
+      button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(56, 189, 248, 0.5); }
+      
+      input {
+        width: 100%; padding: 1rem; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border);
+        border-radius: 8px; color: white; box-sizing: border-box; transition: all 0.3s ease;
+      }
+      input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+      
+      .log { 
+        font-family: 'Courier New', Courier, monospace; font-size: 0.9rem;
+        white-space: pre-wrap; background: #000; color: #10b981; padding: 1rem;
+        border-radius: 8px; max-height: 300px; overflow-y: auto; border: 1px solid #333;
       }
     </style>
   </head>
   <body>
-    <h1>System Configuration</h1>
-    
-    <div class="settings-form">
-      <div class="form-group">
-        <label for="teamName">Team Name:</label>
-        <input type="text" id="teamName" value="%TEAM_NAME%">
+
+    <header><h1>System Parameters</h1></header>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/inventory">Inventory</a>
+      <a href="/robot">Robot</a>
+      <a href="/settings" class="active">Settings</a>
+    </nav>
+    <section>
+      <div class="card" style="max-width: 500px; margin: 0 auto;">
+        <div style="margin-bottom: 1.5rem;">
+          <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Team Designation / Cluster ID</label>
+          <input type="text" id="teamName" value="%TEAM_NAME%">
+        </div>
+        
+        
+        
+        <button onclick="saveSettings()" style="width: 100%; margin-bottom: 1rem;">Sync Configuration</button>
+        <button onclick="window.location.href='/update'" class="danger" style="width: 100%;">System OTA Update</button>
+        
+        <div id="statusMessage" style="margin-top: 1rem; padding: 1rem; border-radius: 8px; display: none; text-align: center; font-weight: bold;"></div>
       </div>
-      
-      <div class="form-group">
-        <label for="lineFollowers">Number of Line Followers:</label>
-        <input type="number" id="lineFollowers" min="1" max="10" value="%LINE_FOLLOWERS%">
-      </div>
-      
-      <div class="form-group">
-        <label for="roboticArms">Number of Robotic Arms:</label>
-        <input type="number" id="roboticArms" min="1" max="5" value="%ROBOTIC_ARMS%">
-      </div>
-      
-      <button onclick="saveSettings()">Save Settings</button>
-      
-      <div id="statusMessage"></div>
-    </div>
+    </section>
 
     <script>
       function saveSettings() {
         const settings = {
-          team: document.getElementById('teamName').value,
-          lineFollowers: parseInt(document.getElementById('lineFollowers').value),
-          roboticArms: parseInt(document.getElementById('roboticArms').value)
+          team: document.getElementById('teamName').value
         };
-
-        fetch('/api/settings', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(settings)
-        })
-        .then(response => response.json())
-        .then(data => {
-          showStatus('Settings saved successfully!', 'success');
-        })
-        .catch(error => {
-          showStatus('Error saving settings: ' + error, 'error');
-        });
+        fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
+        .then(() => showStatus('Parametric sync successful!', 'success'))
+        .catch(err => showStatus('Sync failed: ' + err, 'error'));
       }
 
-      function showStatus(message, type) {
-        const statusDiv = document.getElementById('statusMessage');
-        statusDiv.textContent = message;
-        statusDiv.style.display = 'block';
-        statusDiv.style.backgroundColor = type === 'success' ? '#dff0d8' : '#f2dede';
-        statusDiv.style.color = type === 'success' ? '#3c763d' : '#a94442';
-        
-        setTimeout(() => {
-          statusDiv.style.display = 'none';
-        }, 3000);
+      function showStatus(msg, type) {
+        const d = document.getElementById('statusMessage');
+        d.textContent = msg; d.style.display = 'block';
+        d.style.backgroundColor = type === 'success' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
+        d.style.color = type === 'success' ? '#34d399' : '#f87171';
+        d.style.border = type === 'success' ? '1px solid #059669' : '1px solid #dc2626';
+        setTimeout(() => d.style.display = 'none', 3000);
       }
     </script>
   </body>
@@ -1014,81 +1004,151 @@ void serveSettingsPage() {
 
 void serveInventoryPage() {
   String html = R"rawliteral(
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Inventory Management</title>
-      <style>
-        body { font-family: Arial; margin: 20px; }
-        .rack { 
-          border: 1px solid #ddd; 
-          padding: 15px; 
-          margin-bottom: 15px;
-          border-radius: 5px;
-        }
-        .capacity-bar {
-          height: 20px;
-          background-color: #f0f0f0;
-          border-radius: 3px;
-          margin-top: 5px;
-        }
-        .fill {
-          height: 100%;
-          border-radius: 3px;
-          background-color: #4CAF50;
-        }
-      </style>
-    </head>
-    <body>
-      <h1>Current Inventory Status</h1>
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      :root {
+        --bg-dark: #0f172a;
+        --bg-card: rgba(30, 41, 59, 0.7);
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0ea5e9;
+        --success: #10b981;
+        --danger: #ef4444;
+        --border: rgba(255, 255, 255, 0.1);
+      }
+      body { 
+        font-family: system-ui, -apple-system, sans-serif; 
+        margin: 0; 
+        padding: 0; 
+        background-color: var(--bg-dark); 
+        color: var(--text-main);
+        min-height: 100vh;
+      }
+      header { 
+        padding: 2rem; 
+        text-align: center; 
+        background: linear-gradient(to right, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.9));
+        border-bottom: 1px solid var(--border);
+      }
+      h1, h2 { margin: 0 0 1rem 0; font-weight: 600; }
+      h1 { background: -webkit-linear-gradient(45deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+      nav { 
+        display: flex; justify-content: center; gap: 1rem; padding: 1rem;
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; flex-wrap: wrap;
+      }
+      nav a {
+        color: var(--text-muted); text-decoration: none; padding: 0.75rem 1.5rem;
+        border-radius: 8px; font-weight: 500; transition: all 0.3s ease; border: 1px solid transparent;
+      }
+      nav a:hover, nav a.active { 
+        color: #fff; background: rgba(56, 189, 248, 0.1);
+        border: 1px solid var(--accent); box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+      }
+      section { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+      .card {
+        background: var(--bg-card); backdrop-filter: blur(12px);
+        border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem;
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); transition: transform 0.3s ease;
+      }
+      .card:hover { transform: translateY(-5px); }
       
-      <div class="rack">
-        <h2>Rack A</h2>
-        <p>Items: <span id="rackA-count">%RACKA_COUNT%</span>/%RACKA_CAPACITY%</p>
-        <div class="capacity-bar">
-          <div class="fill" id="rackA-bar" style="width: %RACKA_PERCENT%%"></div>
-        </div>
-      </div>
+      .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+      .status-item:last-child { border-bottom: none; }
+      .status-value { font-weight: bold; color: var(--accent); font-size: 1.2rem; }
+      
+      button {
+        background: linear-gradient(135deg, var(--accent), var(--accent-hover)); border: none;
+        padding: 0.75rem 1.5rem; color: white; font-weight: 600; border-radius: 8px; cursor: pointer;
+        transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+      }
+      button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(56, 189, 248, 0.5); }
+      
+      input {
+        width: 100%; padding: 1rem; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border);
+        border-radius: 8px; color: white; box-sizing: border-box; transition: all 0.3s ease;
+      }
+      input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+      
+      .log { 
+        font-family: 'Courier New', Courier, monospace; font-size: 0.9rem;
+        white-space: pre-wrap; background: #000; color: #10b981; padding: 1rem;
+        border-radius: 8px; max-height: 300px; overflow-y: auto; border: 1px solid #333;
+      }
+    </style>
+  </head>
+  <body>
 
-      <div class="rack">
-        <h2>Rack B</h2>
-        <p>Items: <span id="rackB-count">%RACKB_COUNT%</span>/%RACKB_CAPACITY%</p>
-        <div class="capacity-bar">
-          <div class="fill" id="rackB-bar" style="width: %RACKB_PERCENT%%"></div>
-        </div>
-      </div>
-
-      <div class="rack">
-        <h2>Rack C</h2>
-        <p>Items: <span id="rackC-count">%RACKC_COUNT%</span>/%RACKC_CAPACITY%</p>
-        <div class="capacity-bar">
-          <div class="fill" id="rackC-bar" style="width: %RACKC_PERCENT%%"></div>
-        </div>
-      </div>
-
-      <script>
-        // WebSocket for real-time updates
-        const ws = new WebSocket(`ws://${location.hostname}:81`);
+    <header><h1>Visual Storage Manifest</h1></header>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/inventory" class="active">Inventory</a>
+      <a href="/robot">Robot</a>
+      <a href="/settings">Settings</a>
+    </nav>
+    <section>
+      <div style="display: flex; flex-direction: column; gap: 2rem; max-width: 800px; margin: 0 auto;">
         
-        ws.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          if(data.type === 'inventory') {
-            updateInventory(data);
-          }
-        };
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <h2>Sector Alpha</h2>
+            <div style="color: var(--text-muted);"><span id="rackA-count" style="color: var(--text-main); font-size: 1.5rem; font-weight: bold;">%RACKA_COUNT%</span> / %RACKA_CAPACITY%</div>
+          </div>
+          <div style="height: 24px; background: rgba(0,0,0,0.5); border-radius: 12px; margin-top: 1rem; overflow: hidden; border: 1px solid var(--border); box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);">
+            <div id="rackA-bar" style="height: 100%; width: %RACKA_PERCENT%%; background: linear-gradient(90deg, #10b981, #3b82f6); transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 12px; box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);"></div>
+          </div>
+        </div>
 
-        function updateInventory(data) {
-          if(data.rackA !== undefined) {
-            document.getElementById('rackA-count').textContent = data.rackA;
-            document.getElementById('rackA-bar').style.width = 
-              Math.min(100, (data.rackA/%RACKA_CAPACITY%)*100) + '%';
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <h2>Sector Bravo</h2>
+            <div style="color: var(--text-muted);"><span id="rackB-count" style="color: var(--text-main); font-size: 1.5rem; font-weight: bold;">%RACKB_COUNT%</span> / %RACKB_CAPACITY%</div>
+          </div>
+          <div style="height: 24px; background: rgba(0,0,0,0.5); border-radius: 12px; margin-top: 1rem; overflow: hidden; border: 1px solid var(--border); box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);">
+            <div id="rackB-bar" style="height: 100%; width: %RACKB_PERCENT%%; background: linear-gradient(90deg, #8b5cf6, #d946ef); transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 12px; box-shadow: 0 0 10px rgba(217, 70, 239, 0.8);"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <h2>Sector Charlie</h2>
+            <div style="color: var(--text-muted);"><span id="rackC-count" style="color: var(--text-main); font-size: 1.5rem; font-weight: bold;">%RACKC_COUNT%</span> / %RACKC_CAPACITY%</div>
+          </div>
+          <div style="height: 24px; background: rgba(0,0,0,0.5); border-radius: 12px; margin-top: 1rem; overflow: hidden; border: 1px solid var(--border); box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);">
+            <div id="rackC-bar" style="height: 100%; width: %RACKC_PERCENT%%; background: linear-gradient(90deg, #f59e0b, #ef4444); transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 12px; box-shadow: 0 0 10px rgba(239, 68, 68, 0.8);"></div>
+          </div>
+        </div>
+        
+      </div>
+    </section>
+
+    <script>
+      const ws = new WebSocket(`ws://${location.hostname}:81`);
+      ws.onmessage = (e) => {
+        const d = JSON.parse(e.data);
+        if(d.type === 'inventory') {
+          if(d.rackA !== undefined) {
+             document.getElementById('rackA-count').textContent = d.rackA;
+             document.getElementById('rackA-bar').style.width = Math.min(100, (d.rackA/%RACKA_CAPACITY%)*100) + '%';
           }
-          // Similar updates for rackB and rackC
+          if(d.rackB !== undefined) {
+             document.getElementById('rackB-count').textContent = d.rackB;
+             document.getElementById('rackB-bar').style.width = Math.min(100, (d.rackB/%RACKB_CAPACITY%)*100) + '%';
+          }
+          if(d.rackC !== undefined) {
+             document.getElementById('rackC-count').textContent = d.rackC;
+             document.getElementById('rackC-bar').style.width = Math.min(100, (d.rackC/%RACKC_CAPACITY%)*100) + '%';
+          }
         }
-      </script>
-    </body>
-    </html>
-    )rawliteral";
+      };
+    </script>
+  </body>
+  </html>
+  )rawliteral";
 
       // Replace placeholders with actual values
       html.replace("%RACKA_COUNT%", String(inventory.rackA));
@@ -1166,27 +1226,27 @@ void completePlacement(String robotId, String boxTag, String rack) {
 void setup() {
   Serial.begin(115200);
   while(!Serial); // Wait for serial port to connect (for USB debugging)
-  Serial.println("\n\nStarting Warehouse System Debug");
+  DEBUG_PRINTLN("\n\nStarting Warehouse System Debug");
 
-  NanoSerial.begin(9600, SERIAL_8N1, SERIAL_RX, SERIAL_TX);
+  
   SPI.begin();
   rfid.PCD_Init();
-  initializeSD();
+  initializeStorage();
 
   WiFi.softAP("WarehouseAP", "password123");
-  Serial.println("AP Starting...");
+  DEBUG_PRINTLN("AP Starting...");
   delay(100); // Short delay for AP to initialize
 
   if(!WiFi.softAPIP()) {
-    Serial.println("AP Failed to Start!");
+    DEBUG_PRINTLN("AP Failed to Start!");
     while(1); // Halt if AP fails
   }
 
-  Serial.print("AP IP Address: ");
-  Serial.println(WiFi.softAPIP());
-  Serial.print("MAC Address: ");
-  Serial.println(WiFi.softAPmacAddress());
-  Serial.println("AP IP: " + WiFi.softAPIP().toString());
+  DEBUG_PRINT("AP IP Address: ");
+  DEBUG_PRINTLN(WiFi.softAPIP());
+  DEBUG_PRINT("MAC Address: ");
+  DEBUG_PRINTLN(WiFi.softAPmacAddress());
+  DEBUG_PRINTLN("AP IP: " + WiFi.softAPIP().toString());
 
   server.on("/", HTTP_GET, serveWebInterface);
   server.on("/inventory", HTTP_GET, serveInventoryPage);
@@ -1199,19 +1259,17 @@ void setup() {
   server.on("/api/settings", HTTP_POST, handleSettingsUpdate);
   server.on("/api/box_placed", HTTP_POST, handleBoxPlacement);
   server.begin();
+  ElegantOTA.begin(&server);
 
   webSocket.begin();
   webSocket.onEvent(handleWebSocket);
 
-  if (!SD_MMC.begin()) 
-  {
-  Serial.println("SD Card Mount Failed");
-  return; // Handle failure properly
-  }
+
 }
 
 void loop() {
   server.handleClient();
+  ElegantOTA.loop();
   webSocket.loop();
 
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
@@ -1220,9 +1278,7 @@ void loop() {
     rfid.PCD_StopCrypto1();
   }
 
-  if (NanoSerial.available()) {
-    processArmMessage(NanoSerial.readStringUntil('\n'));
-  }
+  
 
   static unsigned long lastSave = 0;
   if (millis() - lastSave > 30000) {

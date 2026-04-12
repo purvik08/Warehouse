@@ -1,9 +1,27 @@
 #include <WiFi.h>
+#include <WebServer.h>
+#include <ElegantOTA.h>
+
+WebServer otaServer(80);
 #include <HTTPClient.h>
 #include <MFRC522.h>
 #include <NewPing.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
+#include <Preferences.h>
+Preferences preferences;
+#define BATTERY_PIN 36 // True ADC voltage pin
+
+#define DEBUG 1
+#if DEBUG
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
+#endif
 
 #define BOX_PREFIX "BOX"  // Define box tag prefix
 
@@ -88,8 +106,8 @@ const unsigned long PLACEMENT_TIMEOUT = 30000; // 30 seconds
 
 
 float checkBatteryLevel() {
-  // Implement actual battery monitoring
-  return 3.8f; // Example value
+  int raw = analogRead(BATTERY_PIN);
+  return (raw / 4095.0) * 3.3 * 2.0; // Read true voltage
 }
 
 bool checkObstacle() {
@@ -97,9 +115,9 @@ bool checkObstacle() {
   if (distance == 0) distance = MAX_DISTANCE;
   
   if (distance < 30) {
-    Serial.print("Obstacle detected: ");
-    Serial.print(distance);
-    Serial.println("cm");
+    DEBUG_PRINT("Obstacle detected: ");
+    DEBUG_PRINT(distance);
+    DEBUG_PRINTLN("cm");
     return true;
   }
   return false;
@@ -207,10 +225,10 @@ void sendBoxPlacementConfirmation(String rackLocation, String boxTag) {
     
     while (retries-- > 0) {
     if (sendPlacementAttempt(rackLocation, boxTag)) {
-      Serial.println("Box placement confirmed");
+      DEBUG_PRINTLN("Box placement confirmed");
       return;
     }
-    Serial.println("Retrying placement confirmation...");
+    DEBUG_PRINTLN("Retrying placement confirmation...");
     delay(1000);
   }
 
@@ -225,11 +243,11 @@ void sendBoxPlacementConfirmation(String rackLocation, String boxTag) {
     
     int httpCode = http.POST(payload);
     if (httpCode == HTTP_CODE_OK) {
-      Serial.println("Box placement confirmed: " + payload);
+      DEBUG_PRINTLN("Box placement confirmed: " + payload);
       beep(200); beep(200); // Confirmation beeps
     } else {
-      Serial.print("Box placement update failed. Error: ");
-      Serial.println(http.errorToString(httpCode));
+      DEBUG_PRINT("Box placement update failed. Error: ");
+      DEBUG_PRINTLN(http.errorToString(httpCode));
       indicateError();
     }
     http.end();
@@ -290,8 +308,8 @@ void beep(int duration) {
 void startLearningMode() {
   isLearningMode = true;
   setLED(255, 255, 0); // Yellow
-  Serial.println("Entering learning mode...");
-  Serial.println("Scan tags in this order: Home, Pickup, Rack1, Rack2");
+  DEBUG_PRINTLN("Entering learning mode...");
+  DEBUG_PRINTLN("Scan tags in this order: Home, Pickup, Rack1, Rack2");
   beep(1000);
 }
 
@@ -306,22 +324,22 @@ void handleLearningMode() {
     
     if(HOME_TAG == "") {
       HOME_TAG = tag;
-      Serial.println("Home tag learned: " + tag);
+      DEBUG_PRINTLN("Home tag learned: " + tag);
       beep(200);
     } else if(PICKUP_TAG == "") {
       PICKUP_TAG = tag;
-      Serial.println("Pickup tag learned: " + tag);
+      DEBUG_PRINTLN("Pickup tag learned: " + tag);
       beep(200);
     } else if(RACK1_TAG == "") {
       RACK1_TAG = tag;
-      Serial.println("Rack1 tag learned: " + tag);
+      DEBUG_PRINTLN("Rack1 tag learned: " + tag);
       beep(200);
     } else if(RACK2_TAG == "") {
       RACK2_TAG = tag;
-      Serial.println("Rack2 tag learned: " + tag);
+      DEBUG_PRINTLN("Rack2 tag learned: " + tag);
       saveLearnedTags();
       isLearningMode = false;
-      Serial.println("All tags learned!");
+      DEBUG_PRINTLN("All tags learned!");
       indicateReady();
       registerRobot();
     }
@@ -343,19 +361,23 @@ void handleLocationArrival(String location) {
 }
 
 void saveLearnedTags() {
-  // In a real implementation, save to EEPROM
-  Serial.println("Tags saved to memory");
-  // EEPROM implementation would go here
+  preferences.begin("rfid", false);
+  preferences.putString("home", HOME_TAG);
+  preferences.putString("pickup", PICKUP_TAG);
+  preferences.putString("rack1", RACK1_TAG);
+  preferences.putString("rack2", RACK2_TAG);
+  preferences.end();
+  DEBUG_PRINTLN("Tags genuinely saved to ESP32 Flash");
 }
 
 void loadLearnedTags() {
-  // In a real implementation, load from EEPROM
-  Serial.println("Loading tags from memory");
-  // Example tags - replace with EEPROM loading
-  HOME_TAG = "A1B2C3D4";
-  PICKUP_TAG = "E5F6G7H8";
-  RACK1_TAG = "I9J0K1L2";
-  RACK2_TAG = "M3N4O5P6";
+  preferences.begin("rfid", true);
+  HOME_TAG = preferences.getString("home", "");
+  PICKUP_TAG = preferences.getString("pickup", "");
+  RACK1_TAG = preferences.getString("rack1", "");
+  RACK2_TAG = preferences.getString("rack2", "");
+  preferences.end();
+  DEBUG_PRINTLN("Tags retrieved from flash memory");
 }
 
 /* Movement Functions */
@@ -394,7 +416,7 @@ void turnRight() {
 void emergencyStop() {
   stopMotors();
   indicateError();
-  Serial.println("EMERGENCY STOP");
+  DEBUG_PRINTLN("EMERGENCY STOP");
   while (true) {
     if (WiFi.status() == WL_CONNECTED) break;
     delay(200);
@@ -404,7 +426,7 @@ void emergencyStop() {
 
 void checkDestinationTimeout() {
   if(destination != "" && millis() - destinationStartTime > destinationTimeout) {
-    Serial.println("Timeout reached for destination: " + destination);
+    DEBUG_PRINTLN("Timeout reached for destination: " + destination);
     indicateError();
     destination = "";
     stopMotors();
@@ -420,7 +442,7 @@ void handleObstacle() {
   }
   
   if(attemptCount++ < 3) {
-    Serial.println("Obstacle detected - attempting avoidance");
+    DEBUG_PRINTLN("Obstacle detected - attempting avoidance");
     setLED(255, 165, 0); // Orange
     stopMotors();
     delay(500);
@@ -446,8 +468,8 @@ void checkRFID() {
 }
 
 void processRFIDTag(String tag) {
-  Serial.print("RFID Scanned: ");
-  Serial.println(tag);
+  DEBUG_PRINT("RFID Scanned: ");
+  DEBUG_PRINTLN(tag);
 
   // Update current location
   if (tag == HOME_TAG) {
@@ -457,13 +479,8 @@ void processRFIDTag(String tag) {
     currentLocation = "Pickup";
     handleLocationArrival("Pickup");
 
-    // Simulate box pickup
-    if (!hasBox) {
-      currentBoxTag = BOX_TAG_PREFIX + String(random(1000000, 9999999));
-      hasBox = true;
-      Serial.println("Box picked up: " + currentBoxTag);
-      beep(300);
-    }
+    // Robot has arrived at pickup. Awaiting command pipeline from central server to allocate box code.
+
 
   } else if (tag == RACK1_TAG) {
     currentLocation = "Rack1";
@@ -472,42 +489,42 @@ void processRFIDTag(String tag) {
     currentLocation = "Rack2";
     handleLocationArrival("Rack2");
   } else {
-    Serial.println("Unknown tag scanned: " + tag);
+    DEBUG_PRINTLN("Unknown tag scanned: " + tag);
   }
 }
 
 void destinationReached() {
   stopMotors();
   indicateArrival();
-  Serial.println("Reached destination: " + destination);
+  DEBUG_PRINTLN("Reached destination: " + destination);
   destination = "";
   destinationStartTime = 0;
 }
 
 void connectToServerAP() {
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to server AP");
+  DEBUG_PRINT("Connecting to server AP");
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 15) {
     delay(500);
-    Serial.print(".");
+    DEBUG_PRINT(".");
     attempts++;
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected to server AP");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+    DEBUG_PRINTLN("\nConnected to server AP");
+    DEBUG_PRINT("IP Address: ");
+    DEBUG_PRINTLN(WiFi.localIP());
   } else {
-    Serial.println("\nFailed to connect to server AP");
+    DEBUG_PRINTLN("\nFailed to connect to server AP");
     emergencyStop();
   }
 }
 
 void maintainConnection() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Connection lost - reconnecting");
+    DEBUG_PRINTLN("Connection lost - reconnecting");
     WiFi.reconnect();
     delay(1000);
     
@@ -525,10 +542,10 @@ void registerRobot() {
     
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
-      Serial.println("Successfully registered with server");
+      DEBUG_PRINTLN("Successfully registered with server");
     } else {
-      Serial.print("Registration failed. Error: ");
-      Serial.println(http.errorToString(httpCode));
+      DEBUG_PRINT("Registration failed. Error: ");
+      DEBUG_PRINTLN(http.errorToString(httpCode));
     }
     http.end();
   }
@@ -536,7 +553,7 @@ void registerRobot() {
 
 void updateServerStatus() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected, cannot update status");
+    DEBUG_PRINTLN("WiFi not connected, cannot update status");
     return;
   }
 
@@ -555,24 +572,24 @@ void updateServerStatus() {
   String payload;
   serializeJson(doc, payload);
   
-  Serial.print("[Robot] Sending status update: ");
-  Serial.println(payload);
+  DEBUG_PRINT("[Robot] Sending status update: ");
+  DEBUG_PRINTLN(payload);
   
   int httpCode = http.POST(payload);
   
   if (httpCode == HTTP_CODE_OK) {
-    Serial.println("Status updated successfully");
+    DEBUG_PRINTLN("Status updated successfully");
   } else {
-    Serial.print("Status update failed. HTTP Code: ");
-    Serial.println(httpCode);
-    Serial.print("Error: ");
-    Serial.println(http.errorToString(httpCode));
+    DEBUG_PRINT("Status update failed. HTTP Code: ");
+    DEBUG_PRINTLN(httpCode);
+    DEBUG_PRINT("Error: ");
+    DEBUG_PRINTLN(http.errorToString(httpCode));
     
     // Print server response if available
     String response = http.getString();
     if (response.length() > 0) {
-      Serial.print("Server response: ");
-      Serial.println(response);
+      DEBUG_PRINT("Server response: ");
+      DEBUG_PRINTLN(response);
     }
   }
   http.end();
@@ -593,10 +610,17 @@ void checkForCommands() {
   }
 }
 
-void processCommand(String command) {
+void processCommand(String payload) {
+  String command = payload;
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+  if(!error && doc.containsKey("command")) {
+    command = doc["command"].as<String>();
+    if(doc.containsKey("box_tag")) currentBoxTag = doc["box_tag"].as<String>();
+  }
   command.trim();
-  Serial.print("Executing command: ");
-  Serial.println(command);
+  DEBUG_PRINT("Executing remote payload: ");
+  DEBUG_PRINTLN(command);
   
   if (command == "STOP") {
     emergencyStop();
@@ -614,13 +638,14 @@ void processCommand(String command) {
     setDestination("Rack2");
   }
   else if (command == "PICK_BOX") {
-    if (currentLocation == "Pickup" && currentBoxTag != "") {
+    if (currentLocation == "Pickup") {
+      if(currentBoxTag == "") currentBoxTag = "BOX-" + String(millis()); // Fallback tracking ID
       hasBox = true;
-      Serial.println("Box picked up: " + currentBoxTag);
+      DEBUG_PRINTLN("Box technically secured: " + currentBoxTag);
       updateServerStatus();
       beep(300);
     } else {
-      Serial.println("Cannot pick box - not at pickup location or no box detected!");
+      DEBUG_PRINTLN("Cannot execute pick - physical mismatch!");
       indicateError();
     }
   }
@@ -629,7 +654,7 @@ void processCommand(String command) {
 void setDestination(String newDestination) {
   destination = newDestination;
   destinationStartTime = millis();
-  Serial.println("New destination set: " + destination);
+  DEBUG_PRINTLN("New destination set: " + destination);
 }
 
 void handleBoxPlacement() {
@@ -681,7 +706,7 @@ void indicateFailure() {
 
 void attemptRecovery() {
   setLED(255, 165, 0);  // Orange
-  Serial.println("Attempting recovery from failed placement");
+  DEBUG_PRINTLN("Attempting recovery from failed placement");
   
   // Back up slightly
   digitalWrite(motorLeftF, LOW);
@@ -701,27 +726,27 @@ void onPlacementConfirmed() {
   hasBox = false;
   currentBoxTag = "";
   indicateSuccess();  // Now properly defined
-  Serial.println("Box placement confirmed!");
+  DEBUG_PRINTLN("Box placement confirmed!");
 }
 
 void onPlacementFailed() {
   currentPlacement = PLACEMENT_FAILED;
   indicateFailure();  // Now properly defined
   attemptRecovery();  // Now properly defined
-  Serial.println("Box placement failed!");
+  DEBUG_PRINTLN("Box placement failed!");
 }
 
 void debugWiFiConnection() {
-  Serial.println("\n--- WiFi Debug Info ---");
-  Serial.print("Status: ");
-  Serial.println(WiFi.status());
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("RSSI: ");
-  Serial.println(WiFi.RSSI());
-  Serial.println("----------------------");
+  DEBUG_PRINTLN("\n--- WiFi Debug Info ---");
+  DEBUG_PRINT("Status: ");
+  DEBUG_PRINTLN(WiFi.status());
+  DEBUG_PRINT("SSID: ");
+  DEBUG_PRINTLN(WiFi.SSID());
+  DEBUG_PRINT("IP: ");
+  DEBUG_PRINTLN(WiFi.localIP());
+  DEBUG_PRINT("RSSI: ");
+  DEBUG_PRINTLN(WiFi.RSSI());
+  DEBUG_PRINTLN("----------------------");
 }
 
 void setup() {
@@ -732,19 +757,26 @@ void setup() {
   initializeSensors();
   initializeRFID();
   initializeIndicators();
+  loadLearnedTags();
   
   // Connect to network
   connectToServerAP();
+  
+  otaServer.begin();
+  ElegantOTA.begin(&otaServer);
   debugWiFiConnection();
   
   // Register with server
   registerRobot();
-  Serial.println("Robot initialized with predefined tags");
+  DEBUG_PRINTLN("Robot initialized with predefined tags");
   indicateReady();
 }
 
 void loop() {
   maintainConnection();
+  
+  otaServer.handleClient();
+  ElegantOTA.loop();
   
   if(isLearningMode) {
     handleLearningMode();

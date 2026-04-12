@@ -16,15 +16,15 @@
       **Server**
 ---------------------------------------------------
 •	Properties:-
-1.	Uses ESP32 Cam Module as a server
-2.	Offline host using AP (Access Point)
-3.	Mobile Robots connected over Wi-Fi
-4.	Robotic Arm connected over UART
-5.	Offline web host for user interface
-6.	Live robot status update
-7.	Live box counting
-8.	Box location and status update
-9.	All the data is stored in SD card (inside esp32 Cam module)
+1.	Uses ESP32-S3 as a server.
+2.	Offline host using AP (Access Point).
+3.	Mobile Robots connected over Wi-Fi.
+4.	Robotic Arm connected over Wi-Fi.
+5.	Offline web host for user interface.
+6.	Live robot status update.
+7.	Live box counting.
+8.	Box location and status update.
+9.	All the data is stored in the ESP32-S3 internal flash using LittleFS.
 
 **Mobile Robot**
 ---------------------------------------------------
@@ -38,8 +38,8 @@
 **Robotic Arm**
 ---------------------------------------------------
 •	Properties:-
-1.	Uses Arduino Nano for controlling.
-2.	Communicates with the server using UART.
+1.	Uses ESP32 for controlling.
+2.	Communicates with the server over Wi-Fi (HTTP capabilities).
 3.	Consists of servo motors for accurate positioning.
 
 **RFID Cards**
