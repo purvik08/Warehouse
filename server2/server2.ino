@@ -39,7 +39,9 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 #define LOCATION_TAG_PREFIX "LOC"
 #define TAG_LENGTH 10 // 3 chars prefix + 7 chars ID
 
+#include <map>
 std::vector<String> connectedDevices;
+std::map<String, String> commandQueue;
 
 struct {
   String teamName = "Team Lakshya";
@@ -54,14 +56,7 @@ struct Inventory {
   const int rackCCapacity = 700;
 } inventory;
 
-struct PendingPlacement {
-  String robotId;
-  String boxTag;
-  String rack;
-  unsigned long timestamp;
-};
 
-std::vector<PendingPlacement> pendingPlacements;
 
 String getBoxType(String boxTag) {
   if (!boxTag.startsWith(BOX_TAG_PREFIX)) return "INVALID";
@@ -78,13 +73,7 @@ WebServer server(80);
 WebSocketsServer webSocket(81);
 
 int countPendingForRack(String rack) {
-  int count = 0;
-  for (const auto& placement : pendingPlacements) {
-    if (placement.rack == rack) {
-      count++;
-    }
-  }
-  return count;
+  return 0; // pendingPlacements feature removed to fix memory leaks
 }
 
 int getRackAvailableCapacity(String rack) {
@@ -220,31 +209,7 @@ void processLocationTag(String tag) {
   webSocket.broadcastTXT(json);
 }
 
-void processArmMessage(String message) {
-  DynamicJsonDocument doc(128);
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) return;
 
-  if (doc.containsKey("device")) {
-  String deviceName = doc["device"];
-  if (std::find(connectedDevices.begin(), connectedDevices.end(), deviceName) == connectedDevices.end()) {
-    connectedDevices.push_back(deviceName);
-    }
-  }
-
-  if (doc.containsKey("event")) {
-    String event = doc["event"];
-    String logEntry = String(millis()) + "," + event + ",ARM,,";
-    if (doc.containsKey("box")) logEntry += doc["box"].as<String>();
-    logEntry += "\n";
-    appendToFile(TRANSACTIONS_FILE, logEntry);
-
-    doc["type"] = "arm";
-    String json;
-    serializeJson(doc, json);
-    webSocket.broadcastTXT(json);
-  }
-}
 
 void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
   // Debug header
@@ -320,7 +285,9 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
         
         // Send to robotic arm with validation
         if (command == "pick" || command == "place" || command == "home") {
-          notifyRobot("Arm-01", command, "");
+          String targetArm = "Arm-01";
+          for (const String& d : connectedDevices) { if(d.startsWith("Arm")) { targetArm = d; break; } }
+          notifyRobot(targetArm, command, "");
           webSocket.sendTXT(num, "{\"status\":\"command_sent\"}");
         } else {
           webSocket.sendTXT(num, "{\"error\":\"invalid_command\"}");
@@ -456,8 +423,15 @@ void handleCommand() {
     return;
   }
   String command = server.arg("plain");
-  DEBUG_PRINTLN("Sending to arm: " + command);
-  notifyRobot("Arm-01", command, "");
+  String targetArm = "Arm-01";
+  for (const String& dev : connectedDevices) {
+    if (dev.startsWith("Arm")) {
+      targetArm = dev;
+      break;
+    }
+  }
+  DEBUG_PRINTLN("Sending to arm (" + targetArm + "): " + command);
+  notifyRobot(targetArm, command, "");
   server.send(200, "application/json", "{\"status\":\"command_sent\"}");
 }
 
@@ -518,25 +492,8 @@ void handleBoxPlacement() {
   String logEntry = String(millis()) + ",box_placed," + robot + "," + rack + "," + box + "\n";
   appendToFile(TRANSACTIONS_FILE, logEntry);
 
-  PendingPlacement p {
-    doc["robot"].as<String>(),
-    doc["box"].as<String>(),
-    doc["rack"].as<String>(),
-    millis()
-  };
-  pendingPlacements.push_back(p);
-  server.send(202, "application/json", "{\"status\":\"processing\"}");
-  
-  // Broadcast update to all clients
-  DynamicJsonDocument update(256);
-  update["type"] = "inventory";
-  update["rackA"] = inventory.rackA;
-  update["rackB"] = inventory.rackB;
-  update["rackC"] = inventory.rackC;
-  
-  String json;
-  serializeJson(update, json);
-  webSocket.broadcastTXT(json);
+  completePlacement(robot, box, rack);
+  server.send(200, "application/json", "{\"status\":\"confirmed\"}");
 }
 
 void serveWebInterface() {
@@ -996,8 +953,13 @@ void serveSettingsPage() {
 
     // Replace placeholders with current config values
     html.replace("%TEAM_NAME%", config.teamName);
-    html.replace("%LINE_FOLLOWERS%", String(config.lineFollowers));
-    html.replace("%ROBOTIC_ARMS%", String(config.roboticArms));
+    int lf_cnt = 0, arm_cnt = 0;
+    for(auto &d : connectedDevices){
+      if(d.startsWith("LF-")) lf_cnt++;
+      if(d.startsWith("Arm")) arm_cnt++;
+    }
+    html.replace("%LINE_FOLLOWERS%", String(lf_cnt));
+    html.replace("%ROBOTIC_ARMS%", String(arm_cnt));
 
   server.send(200, "text/html", html);
 }
@@ -1198,24 +1160,18 @@ void notifyRobot(String robotId, String message, String boxTag) {
   
   String json;
   serializeJson(doc, json);
-  
-  // Send to WebSocket (assuming robots are connected via WebSocket)
   webSocket.broadcastTXT(json);
   
-  // Alternatively, could send via serial if using physical connections
-  // NanoSerial.println(json);
+  // Queue command for robots polling via HTTP
+  DynamicJsonDocument cmdDoc(128);
+  cmdDoc["command"] = message;
+  if(boxTag != "") cmdDoc["box_tag"] = boxTag;
+  String cmdJson;
+  serializeJson(cmdDoc, cmdJson);
+  commandQueue[robotId] = cmdJson;
 }
 
 void completePlacement(String robotId, String boxTag, String rack) {
-  // Remove from pending
-  pendingPlacements.erase(
-    std::remove_if(pendingPlacements.begin(), pendingPlacements.end(),
-      [&](const PendingPlacement& p) {
-        return p.robotId == robotId && p.boxTag == boxTag && p.rack == rack;
-      }),
-    pendingPlacements.end()
-  );
-  
   // Update inventory
   updateInventory(rack, 1);
   
@@ -1258,6 +1214,34 @@ void setup() {
   server.on("/api/database", HTTP_GET, handleDatabaseDownload);
   server.on("/api/settings", HTTP_POST, handleSettingsUpdate);
   server.on("/api/box_placed", HTTP_POST, handleBoxPlacement);
+  
+  server.on("/api/register", HTTP_GET, []() {
+    if (server.hasArg("robot")) {
+      String id = server.arg("robot");
+      if (std::find(connectedDevices.begin(), connectedDevices.end(), id) == connectedDevices.end()) {
+        connectedDevices.push_back(id);
+      }
+      server.send(200, "application/json", "{\"status\":\"registered\"}");
+    } else {
+      server.send(400, "application/json", "{\"error\":\"missing_robot_id\"}");
+    }
+  });
+
+  server.onNotFound([]() {
+    if (server.uri().startsWith("/api/commands/")) {
+      String id = server.uri().substring(14); // len("/api/commands/") == 14
+      if (commandQueue.find(id) != commandQueue.end() && commandQueue[id] != "") {
+        String cmd = commandQueue[id];
+        commandQueue[id] = ""; // clear after reading
+        server.send(200, "application/json", cmd);
+      } else {
+        server.send(200, "application/json", "{}"); // Empty command object
+      }
+      return;
+    }
+    server.send(404, "text/plain", "Not found");
+  });
+
   server.begin();
   ElegantOTA.begin(&server);
 

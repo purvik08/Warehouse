@@ -3,6 +3,7 @@
 #include <ElegantOTA.h>
 
 WebServer otaServer(80);
+bool otaStarted = false;
 #include <HTTPClient.h>
 #include <MFRC522.h>
 #include <NewPing.h>
@@ -226,6 +227,7 @@ void sendBoxPlacementConfirmation(String rackLocation, String boxTag) {
     while (retries-- > 0) {
     if (sendPlacementAttempt(rackLocation, boxTag)) {
       DEBUG_PRINTLN("Box placement confirmed");
+      http.end();
       return;
     }
     DEBUG_PRINTLN("Retrying placement confirmation...");
@@ -351,12 +353,8 @@ void handleLocationArrival(String location) {
   if (destination == location) {
     destinationReached();
     
-    // If at rack with a box, send placement confirmation
-    if ((location == "Rack1" || location == "Rack2") && hasBox && currentBoxTag != "") {
-      sendBoxPlacementConfirmation(location, currentBoxTag);
-      hasBox = false;
-      currentBoxTag = "";
-    }
+    // Let loop() evaluate handleBoxPlacement() 
+    // when it cycles and reads "shouldPlaceBox()" -> true
   }
 }
 
@@ -530,6 +528,8 @@ void maintainConnection() {
     
     if (WiFi.status() != WL_CONNECTED) {
       emergencyStop();
+    } else {
+      if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
     }
   }
 }
@@ -667,9 +667,12 @@ void handleBoxPlacement() {
   }
 
   if (shouldPlaceBox()) {
-    if (sendPlacementRequest()) {
-      currentPlacement = PLACEMENT_IN_PROGRESS;
-      placementStartTime = millis();
+    currentPlacement = PLACEMENT_IN_PROGRESS;
+    if (confirmPlacement(currentLocation, currentBoxTag)) {
+      onPlacementConfirmed();
+      currentPlacement = PLACEMENT_IDLE; // Reset state
+    } else {
+      onPlacementFailed();
     }
   }
 }
@@ -762,8 +765,7 @@ void setup() {
   // Connect to network
   connectToServerAP();
   
-  otaServer.begin();
-  ElegantOTA.begin(&otaServer);
+  if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
   debugWiFiConnection();
   
   // Register with server
@@ -792,6 +794,7 @@ void loop() {
   checkRFID();
   checkForCommands();
   checkDestinationTimeout();
+  handleBoxPlacement();
   
   if (millis() - lastStatusUpdate > statusUpdateInterval) {
     lastStatusUpdate = millis();

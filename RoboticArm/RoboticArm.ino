@@ -4,6 +4,7 @@
 #include <ElegantOTA.h>
 
 WebServer otaServer(80);
+bool otaStarted = false;
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
@@ -71,8 +72,7 @@ void setup() {
   // Wi-Fi
   connectToServerAP();
   
-  otaServer.begin();
-  ElegantOTA.begin(&otaServer);
+  if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
   sendStatus();
 }
 
@@ -95,8 +95,7 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectToServerAP();
   
-  otaServer.begin();
-  ElegantOTA.begin(&otaServer);
+    if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
   }
 
   // Poll for commands like MobileRobot
