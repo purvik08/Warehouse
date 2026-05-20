@@ -1,5 +1,6 @@
-
 #include <WiFi.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -41,6 +42,7 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 
 #include <map>
 std::vector<String> connectedDevices;
+std::map<String, unsigned long> deviceLastSeen;
 std::map<String, String> commandQueue;
 
 struct {
@@ -218,13 +220,6 @@ void handleWebSocket(uint8_t num, WStype_t type, uint8_t * payload, size_t lengt
   switch(type) {
     case WStype_DISCONNECTED:
       DEBUG_PRINTLN("Disconnected");
-      // Remove from connected devices list
-      connectedDevices.erase(std::remove_if(connectedDevices.begin(), 
-                                          connectedDevices.end(),
-                                          [num](const String& dev) {
-                                            return dev.startsWith("Client"+String(num));
-                                          }),
-                          connectedDevices.end());
       break;
 
     case WStype_CONNECTED: {
@@ -399,6 +394,7 @@ void handleRobotStatusUpdate() {
     if (std::find(connectedDevices.begin(), connectedDevices.end(), deviceName) == connectedDevices.end()) {
       connectedDevices.push_back(deviceName);
     }
+    deviceLastSeen[deviceName] = millis(); // Refresh Heartbeat
   }
 
   // Log received data for debugging
@@ -600,6 +596,14 @@ void serveWebInterface() {
           <div class="status-item"><span>Rack C</span><span class="status-value" id="rackC-status">%RACKC_COUNT%/%RACKC_CAPACITY%</span></div>
         </div>
       </div>
+      
+      <div class="card" style="margin-top: 2rem;">
+        <h2>Fleet Telemetry</h2>
+        <div id="fleetStatus" style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
+          <div style="color: var(--text-muted); font-style: italic;">Awaiting telemetry...</div>
+        </div>
+      </div>
+
       <div class="card" style="margin-top: 2rem;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
           <h2 style="margin: 0;">Live Network Logs</h2>
@@ -613,6 +617,8 @@ void serveWebInterface() {
     let ws;
     let logOutput = document.getElementById('logOutput');
 
+    let fleetData = {};
+
     function connectWebSocket() {
       ws = new WebSocket(`ws://${location.hostname}:81`);
       ws.onopen = () => log("Network connection established.");
@@ -624,6 +630,7 @@ void serveWebInterface() {
           else if (d.type === 'location') log(">>> Localization Ping: " + d.tag);
           else if (d.type === 'arm') log(">>> Arm Event: " + JSON.stringify(d));
           else if (d.type === 'status') updateDeviceStatus(d);
+          else if (d.type === 'robot_status') updateFleetUI(d);
         } catch (err) { log("RAW: " + e.data); }
       };
       ws.onclose = () => { log("Connection lost. Reconnecting..."); setTimeout(connectWebSocket, 3000); };
@@ -639,6 +646,31 @@ void serveWebInterface() {
       if(data.rackA !== undefined) document.getElementById('rackA-status').textContent = `${data.rackA}/%RACKA_CAPACITY%`;
       if(data.rackB !== undefined) document.getElementById('rackB-status').textContent = `${data.rackB}/%RACKB_CAPACITY%`;
       if(data.rackC !== undefined) document.getElementById('rackC-status').textContent = `${data.rackC}/%RACKC_CAPACITY%`;
+    }
+
+    function updateFleetUI(d) {
+      let devName = d.robot || d.device || "Unknown Device";
+      if (!fleetData[devName]) fleetData[devName] = {};
+      
+      if(d.battery !== undefined) fleetData[devName].battery = d.battery;
+      if(d.error !== undefined) fleetData[devName].error = d.error;
+      if(d.status !== undefined) fleetData[devName].status = d.status;
+      fleetData[devName].lastSeen = new Date().toLocaleTimeString();
+
+      let container = document.getElementById('fleetStatus');
+      container.innerHTML = '';
+      for (let [name, info] of Object.entries(fleetData)) {
+          let errStatus = info.error || 'OK';
+          let errColor = errStatus !== 'OK' ? 'var(--danger)' : 'var(--success)';
+          let batt = info.battery !== undefined ? info.battery + '%' : 'N/A';
+          let card = `<div style="display: flex; justify-content: space-between; background: rgba(0,0,0,0.2); padding: 1rem; border-radius: 8px; border-left: 4px solid ${errColor}">
+              <strong style="color:var(--accent)">${name}</strong>
+              <span style="color:var(--text-main)">⚡ ${batt}</span>
+              <span style="color:${errColor}; font-weight:bold;">${errStatus}</span>
+              <span style="color:var(--text-muted); font-size:0.8rem;">${info.lastSeen}</span>
+          </div>`;
+          container.innerHTML += card;
+      }
     }
 
     function updateDeviceStatus(data) {
@@ -1189,20 +1221,23 @@ void setup() {
   rfid.PCD_Init();
   initializeStorage();
 
-  WiFi.softAP("WarehouseAP", "password123");
-  DEBUG_PRINTLN("AP Starting...");
-  delay(100); // Short delay for AP to initialize
-
-  if(!WiFi.softAPIP()) {
-    DEBUG_PRINTLN("AP Failed to Start!");
-    while(1); // Halt if AP fails
+  WiFiManager wifiManager;
+  DEBUG_PRINTLN("Starting WiFiManager AP / Connecting...");
+  if (!wifiManager.autoConnect("WarehouseConfig_Server")) {
+    DEBUG_PRINTLN("Failed to connect and hit timeout. Restarting...");
+    delay(3000);
+    ESP.restart();
   }
 
-  DEBUG_PRINT("AP IP Address: ");
-  DEBUG_PRINTLN(WiFi.softAPIP());
-  DEBUG_PRINT("MAC Address: ");
-  DEBUG_PRINTLN(WiFi.softAPmacAddress());
-  DEBUG_PRINTLN("AP IP: " + WiFi.softAPIP().toString());
+  DEBUG_PRINTLN("Connected to Wi-Fi successfully!");
+  DEBUG_PRINT("IP Address: ");
+  DEBUG_PRINTLN(WiFi.localIP());
+
+  if (!MDNS.begin("warehouse")) {
+    DEBUG_PRINTLN("Error setting up MDNS responder!");
+  } else {
+    DEBUG_PRINTLN("mDNS responder started at http://warehouse.local");
+  }
 
   server.on("/", HTTP_GET, serveWebInterface);
   server.on("/inventory", HTTP_GET, serveInventoryPage);
@@ -1221,6 +1256,7 @@ void setup() {
       if (std::find(connectedDevices.begin(), connectedDevices.end(), id) == connectedDevices.end()) {
         connectedDevices.push_back(id);
       }
+      deviceLastSeen[id] = millis();
       server.send(200, "application/json", "{\"status\":\"registered\"}");
     } else {
       server.send(400, "application/json", "{\"error\":\"missing_robot_id\"}");
@@ -1267,6 +1303,21 @@ void loop() {
   static unsigned long lastSave = 0;
   if (millis() - lastSave > 30000) {
     saveDatabase();
+    
+    // Purge zombie devices missing for >30s
+    unsigned long now = millis();
+    for (auto it = deviceLastSeen.begin(); it != deviceLastSeen.end(); ) {
+      if (now - it->second > 30000) {
+        it = deviceLastSeen.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    connectedDevices.erase(std::remove_if(connectedDevices.begin(), connectedDevices.end(), [](const String& dev) {
+      return deviceLastSeen.find(dev) == deviceLastSeen.end();
+    }), connectedDevices.end());
+    
     lastSave = millis();
   }
 }

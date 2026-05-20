@@ -1,5 +1,8 @@
 #include <ESP32Servo.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include <esp_task_wdt.h>
 #include <WebServer.h>
 #include <ElegantOTA.h>
 
@@ -18,11 +21,13 @@ bool otaStarted = false;
   #define DEBUG_PRINTLN(x)
 #endif
 
+#define WDT_TIMEOUT 10 // 10 seconds task watchdog
+#define BATTERY_PIN 34 // Analog pin for battery voltage reading
+
 // Server Connection Config
-const char* ssid = "WarehouseAP";
-const char* password = "password123";
 const String armID = "Arm-01";
-const String serverIP = "192.168.4.1";
+String serverIP = "";
+int httpFailures = 0;
 
 // Servo Configuration
 Servo baseServo;
@@ -43,6 +48,10 @@ unsigned long lastCommandCheck = 0;
 
 void setup() {
   Serial.begin(115200);
+
+  // Initialize Watchdog Timer
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+  esp_task_wdt_add(NULL);
   
   // Initialize ESP32 PWM timers
   ESP32PWM::allocateTimer(0);
@@ -69,31 +78,60 @@ void setup() {
   // Home position
   goHome();
   
-  // Wi-Fi
-  connectToServerAP();
+  // Wi-Fi Configuration
+  connectNetwork();
+  resolveServer();
   
   if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
   sendStatus();
 }
 
-void connectToServerAP() {
-  WiFi.begin(ssid, password);
-  DEBUG_PRINT("Connecting to server AP");
+void connectNetwork() {
+  WiFiManager wifiManager;
+  DEBUG_PRINTLN("Starting AP Config / Connecting to WiFi...");
+  if (!wifiManager.autoConnect("WarehouseConfig_Arm01")) {
+    DEBUG_PRINTLN("Failed to connect and hit timeout. Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+  DEBUG_PRINTLN("\nConnected to WiFi!");
+}
+
+void resolveServer() {
+  DEBUG_PRINT("Resolving warehouse.local...");
+  IPAddress resolvedIP;
+  int retries = 0;
   
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    DEBUG_PRINT(".");
+  if (!MDNS.begin(armID.c_str())) {
+      DEBUG_PRINTLN("Error setting up mDNS");
   }
   
-  DEBUG_PRINTLN("\nConnected to server AP");
+  while(serverIP == "" && retries < 15) {
+    esp_task_wdt_reset(); // Feed watchdog during blocking server resolution
+    resolvedIP = MDNS.queryHost("warehouse");
+    if(resolvedIP.toString() != "0.0.0.0") {
+       serverIP = resolvedIP.toString();
+       DEBUG_PRINTLN(" Resolved: " + serverIP);
+    } else {
+       delay(1000);
+       DEBUG_PRINT(".");
+       retries++;
+    }
+  }
+  
+  if(serverIP == "") {
+      DEBUG_PRINTLN("\nFailed to resolve server IP via mDNS. Using fallback dummy.");
+      serverIP = "192.168.4.1"; // Fallback
+  }
 }
 
 void loop() {
+  esp_task_wdt_reset(); // Feed the watchdog
   otaServer.handleClient();
   ElegantOTA.loop();
 
   if (WiFi.status() != WL_CONNECTED) {
-    connectToServerAP();
+    connectNetwork();
   
     if(!otaStarted) { otaServer.begin(); ElegantOTA.begin(&otaServer); otaStarted = true; }
   }
@@ -107,16 +145,25 @@ void loop() {
 }
 
 void checkForCommands() {
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED && serverIP != "") {
     HTTPClient http;
     String url = "http://" + serverIP + "/api/commands/" + armID;
     http.begin(url);
     
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
+      httpFailures = 0; // Reset failures on success
       String payload = http.getString();
       if(payload.length() > 0) {
          processCommand(payload);
+      }
+    } else {
+      httpFailures++;
+      if (httpFailures > 5) {
+         DEBUG_PRINTLN("Excessive HTTP failures. Re-resolving Server IP...");
+         serverIP = ""; // Force re-resolve
+         resolveServer();
+         httpFailures = 0;
       }
     }
     http.end();
@@ -151,7 +198,7 @@ void processCommand(String command) {
 }
 
 void notifyServerEvent(String eventName) {
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED && serverIP != "") {
     HTTPClient http;
     String url = "http://" + serverIP + "/api/status"; // general status endpoint or relay
     http.begin(url);
@@ -162,6 +209,11 @@ void notifyServerEvent(String eventName) {
     doc["event"] = eventName;
     doc["status"] = armStatus;
     doc["hasBox"] = hasBox;
+    
+    // Read and append battery percentage
+    int rawVal = analogRead(BATTERY_PIN);
+    int battPercent = map(rawVal, 0, 4095, 0, 100);
+    doc["battery"] = constrain(battPercent, 0, 100);
     
     String payload;
     serializeJson(doc, payload);
