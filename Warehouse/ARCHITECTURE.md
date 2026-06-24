@@ -76,13 +76,15 @@ The system employs a **hybrid communication architecture** leveraging both **ROS
 ```
 
 ### The Cargo Handling Loop (Step-by-Step)
-1. **RFID Box Scan**: A box is scanned by the reader connected to the **ESP32-S3 Server**.
-2. **ROS2 Broadcast**: The Server processes the card payload and publishes it on the `/warehouse/server/rfid` topic.
-3. **Mission Assignment**: The RPi5's `warehouse_manager_node` catches the RFID scan, increments the mission tracker, and publishes a `move_forward` or waypoint command to `/warehouse/agv/command`.
-4. **Robot Transit**: The **Mobile Robot** follows its line track. When it passes a floor location marker (like `LOC_ARM`), it publishes a location update `/warehouse/agv/location`.
-5. **Arm Hand-off**: The `warehouse_manager_node` tells the robot to `stop`, and tells the **Robotic Arm** to `pick` on `/warehouse/arm/command`.
-6. **Placement**: The Arm picks up the cargo, and notifies the manager. The robot is commanded to drive to the storage rack (`LOC_RACK_A`, `B`, or `C`). The arm completes the placement and calls `completePlacement()`.
-7. **Database Persistence**: The Server writes the transaction log to its internal flash using **LittleFS** and broadcasts a JSON payload via **WebSockets** to update the visual counts.
+*Note: The Robotic Arm is physically mounted on top of the Mobile Robot (AGV) chassis, enabling mobile pick-and-place capabilities throughout the warehouse.*
+
+1. **RFID Box Scan**: A box is scanned at the conveyor by the reader connected to the **ESP32-S3 Server**.
+2. **ROS2 Broadcast**: The Server increments its inventory (Sector A, B, or C) based on the tag prefix (`BOXA_`, `BOXB_`, `BOXC_`), writes to LittleFS flash, broadcasts to WebSockets, and publishes the tag to `/warehouse/server/rfid`.
+3. **Mission Start**: The RPi5's `warehouse_manager_node` receives the scan, transitions to `BOX_DETECTED`, and commands the onboard Robotic Arm to `pick` via `/warehouse/arm/command`.
+4. **Arm Picking**: The Arm executes its picking sequence to grab the box from the conveyor. Once done, it publishes its status as `HOLDING` on `/warehouse/arm/status`.
+5. **AGV Dispatch**: The Manager transitions to `AGV_MOVING` and dispatches the AGV using the direct command `move_forward` published to `/warehouse/agv/command`.
+6. **AGV Navigation**: The AGV drives along the line track carrying the arm. When it scans the target floor tag (e.g. `LOC-RACK-A`), it publishes the landmark to `/warehouse/agv/location`, and the manager stops the AGV.
+7. **Arm Placement**: The manager commands the arm to `place` on `/warehouse/arm/command`. The arm deposits the box onto the rack, returns to `IDLE` status, and the manager resets the state machine to `IDLE`.
 
 ---
 
@@ -114,10 +116,11 @@ The system employs a **hybrid communication architecture** leveraging both **ROS
 
 ## 🎨 4. Frontend Web UI (HTML/CSS/JS)
 
-The user dashboard is served directly from the Server's flash memory.
+The user dashboard and control console are served directly from the ESP32-S3 Server's flash memory.
 * **Design Language**: Dark slate UI (`#0f172a`), utilizing responsive flex grids, CSS gradients, glowing percentage indicators, and custom micro-animations for cards.
 * **Live Telemetry (JS)**: Uses standard JavaScript WebSockets (`new WebSocket()`) to receive JSON telemetry strings, parse them dynamically, and update the DOM elements without reloading the page.
 * **Fallback API Polling**: If the WebSocket drops, the JS engine falls back to polling `/api/status` every 5 seconds.
+* **Robotic Arm Console (`/robot` route)**: Spawns a dedicated manual control page that lets operators trigger manual Pick, Place, or Home movements, or inject custom raw instructions directly to the Robotic Arm.
 
 ---
 
