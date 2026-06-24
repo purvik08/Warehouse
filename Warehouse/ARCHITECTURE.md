@@ -76,15 +76,15 @@ The system employs a **hybrid communication architecture** leveraging both **ROS
 ```
 
 ### The Cargo Handling Loop (Step-by-Step)
-*Note: The Robotic Arm is physically mounted on top of the Mobile Robot (AGV) chassis, enabling mobile pick-and-place capabilities throughout the warehouse.*
+*Note: The Robotic Arm is stationary at a fixed base near the conveyor belt. The Mobile Robot (AGV) is a separate line-following cart that receives the box at the pickup point and carries it to the storage rack.*
 
 1. **RFID Box Scan**: A box is scanned at the conveyor by the reader connected to the **ESP32-S3 Server**.
-2. **ROS2 Broadcast**: The Server increments its inventory (Sector A, B, or C) based on the tag prefix (`BOXA_`, `BOXB_`, `BOXC_`), writes to LittleFS flash, broadcasts to WebSockets, and publishes the tag to `/warehouse/server/rfid`.
-3. **Mission Start**: The RPi5's `warehouse_manager_node` receives the scan, transitions to `BOX_DETECTED`, and commands the onboard Robotic Arm to `pick` via `/warehouse/arm/command`.
-4. **Arm Picking**: The Arm executes its picking sequence to grab the box from the conveyor. Once done, it publishes its status as `HOLDING` on `/warehouse/arm/status`.
-5. **AGV Dispatch**: The Manager transitions to `AGV_MOVING` and dispatches the AGV using the direct command `move_forward` published to `/warehouse/agv/command`.
-6. **AGV Navigation**: The AGV drives along the line track carrying the arm. When it scans the target floor tag (e.g. `LOC-RACK-A`), it publishes the landmark to `/warehouse/agv/location`, and the manager stops the AGV.
-7. **Arm Placement**: The manager commands the arm to `place` on `/warehouse/arm/command`. The arm deposits the box onto the rack, returns to `IDLE` status, and the manager resets the state machine to `IDLE`.
+2. **ROS2 Broadcast**: The Server increments its inventory (Sector A, B, or C) based on the tag prefix (`BOXA_`, `BOXB_`, `BOXC_`), writes to LittleFS flash, broadcasts via WebSockets, and publishes the tag to `/warehouse/server/rfid`.
+3. **Mission Start**: The RPi5's `warehouse_manager_node` transitions to `BOX_DETECTED` and commands the stationary Robotic Arm to `pick` via `/warehouse/arm/command`.
+4. **Arm Loading**: The Robotic Arm picks the box from the conveyor and places it onto the waiting Mobile Robot (AGV) at the pickup station.
+5. **AGV Dispatch**: The AGV senses the box placed on top of it (e.g. via an onboard sensor or when commanded by the manager node on `/warehouse/agv/command`).
+6. **AGV Navigation**: The AGV drives along the line track carrying the box. When it scans the target floor RFID tag (e.g. `LOC-RACK-A`), it publishes the landmark to `/warehouse/agv/location`, and the manager stops the AGV.
+7. **Cargo Unloading**: The box is transferred to the destination rack, and the manager resets the state machine to `IDLE` for the next run.
 
 ---
 
