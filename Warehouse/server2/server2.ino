@@ -8,6 +8,41 @@
 #include <ElegantOTA.h>
 #include <MFRC522.h>
 
+// ── micro-ROS (ROS2 Humble bridge) ──────────────────────────────────────────
+// The server ESP32-S3 publishes RFID scans and inventory snapshots to ROS2.
+// All existing web dashboard code below is UNCHANGED.
+#include <micro_ros_arduino.h>
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <std_msgs/msg/string.h>
+
+// micro-ROS entities (server node)
+static rcl_node_t          mros_node;
+static rclc_support_t      mros_support;
+static rcl_allocator_t     mros_allocator;
+static rclc_executor_t     mros_executor;
+static rcl_publisher_t     pub_rfid;
+static rcl_publisher_t     pub_inventory;
+static std_msgs__msg__String msg_rfid_out;
+static std_msgs__msg__String msg_inv_out;
+static char rfidBuf[64]  = "";
+static char invBuf[128]  = "";
+static bool mrosReady    = false;
+
+// IMPORTANT: Set this to your RPi5's IP address (or use mDNS warehouse-rpi.local)
+#define MICROROS_AGENT_IP   "192.168.1.100"
+#define MICROROS_AGENT_PORT 8888
+
+#define RCSOFTCHECK_SVR(fn) { rcl_ret_t _t = fn; \
+  if(_t != RCL_RET_OK) DEBUG_PRINTF("[mROS WARN] ret=%d\n",(int)_t); }
+
+void initMicroROSServer();
+void publishRFIDEvent(const char* tag);
+void publishInventorySnapshot();
+// ────────────────────────────────────────────────────────────────────────────
+
 #define DEBUG 1
 
 #if DEBUG
@@ -173,6 +208,9 @@ void processRFID() {
   } else if (tag.startsWith("LOC")) {
     processLocationTag(tag);
   }
+
+  // Publish RFID tag to ROS2 /warehouse/server/rfid
+  publishRFIDEvent(tag.c_str());
 
   DynamicJsonDocument doc(128);
   doc["type"] = "rfid";
@@ -1169,9 +1207,12 @@ void updateInventory(String rack, int change) {
     if (inventory.rackC < 0) inventory.rackC = 0;
   }
   
-  saveInventory(); // Save the updated inventory to SD card
+  saveInventory(); // Save the updated inventory to flash
 
-  // Broadcast update to all clients
+  // Publish inventory snapshot to ROS2 /warehouse/server/inventory
+  publishInventorySnapshot();
+
+  // Broadcast update to all WebSocket clients (existing dashboard)
   DynamicJsonDocument doc(256);
   doc["type"] = "inventory";
   doc["rackA"] = inventory.rackA;
@@ -1211,9 +1252,75 @@ void completePlacement(String robotId, String boxTag, String rack) {
   notifyRobot(robotId, "placement_success", boxTag);
 }
 
+// ── micro-ROS server publisher init ─────────────────────────────────────────
+void initMicroROSServer() {
+  // Use WiFi already connected by WiFiManager
+  // micro-ROS WiFi transport points at RPi5 agent
+  set_microros_wifi_transports(
+    (char*)WiFi.SSID().c_str(),
+    (char*)WiFi.psk().c_str(),
+    (char*)MICROROS_AGENT_IP,
+    MICROROS_AGENT_PORT
+  );
+  delay(500);
+
+  mros_allocator = rcl_get_default_allocator();
+  if (rclc_support_init(&mros_support, 0, NULL, &mros_allocator) != RCL_RET_OK) {
+    DEBUG_PRINTLN("[mROS] support init failed");
+    return;
+  }
+  if (rclc_node_init_default(&mros_node, "server_s3", "warehouse", &mros_support) != RCL_RET_OK) {
+    DEBUG_PRINTLN("[mROS] node init failed");
+    return;
+  }
+
+  rclc_publisher_init_default(&pub_rfid,
+    &mros_node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "/warehouse/server/rfid");
+
+  rclc_publisher_init_default(&pub_inventory,
+    &mros_node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "/warehouse/server/inventory");
+
+  msg_rfid_out.data.capacity = 64;
+  msg_rfid_out.data.data = rfidBuf;
+  msg_rfid_out.data.size = 0;
+
+  msg_inv_out.data.capacity = 128;
+  msg_inv_out.data.data = invBuf;
+  msg_inv_out.data.size = 0;
+
+  // Executor with 0 subscriptions (server only publishes)
+  rclc_executor_init(&mros_executor, &mros_support.context, 1, &mros_allocator);
+
+  mrosReady = true;
+  DEBUG_PRINTLN("[mROS] Server micro-ROS ready. Publishing to /warehouse/server/rfid and /warehouse/server/inventory");
+}
+
+void publishRFIDEvent(const char* tag) {
+  if (!mrosReady) return;
+  strncpy(rfidBuf, tag, sizeof(rfidBuf));
+  msg_rfid_out.data.size = strlen(tag);
+  RCSOFTCHECK_SVR(rcl_publish(&pub_rfid, &msg_rfid_out, NULL));
+}
+
+void publishInventorySnapshot() {
+  if (!mrosReady) return;
+  // Serialise as compact JSON: {"rackA":N,"rackB":N,"rackC":N}
+  snprintf(invBuf, sizeof(invBuf),
+    "{\"rackA\":%d,\"rackB\":%d,\"rackC\":%d}",
+    inventory.rackA, inventory.rackB, inventory.rackC);
+  msg_inv_out.data.size = strlen(invBuf);
+  RCSOFTCHECK_SVR(rcl_publish(&pub_inventory, &msg_inv_out, NULL));
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 void setup() {
   Serial.begin(115200);
-  while(!Serial); // Wait for serial port to connect (for USB debugging)
+  // BUG FIX: Removed while(!Serial) — hangs forever on battery-powered boot
+  //          without USB. Use a short timeout instead.
+  unsigned long _t0 = millis();
+  while(!Serial && millis() - _t0 < 3000);
   DEBUG_PRINTLN("\n\nStarting Warehouse System Debug");
 
   
@@ -1284,13 +1391,21 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(handleWebSocket);
 
-
+  // Initialise micro-ROS after WiFi is connected
+  // BUG FIX: original had while(!Serial) which hangs forever on USB-less boot.
+  // Moved micro-ROS init here — after WiFiManager connection is confirmed.
+  initMicroROSServer();
 }
 
 void loop() {
   server.handleClient();
   ElegantOTA.loop();
   webSocket.loop();
+
+  // Spin micro-ROS executor (non-blocking, minimal time budget)
+  if (mrosReady) {
+    rclc_executor_spin_some(&mros_executor, RCL_MS_TO_NS(2));
+  }
 
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     processRFID();
