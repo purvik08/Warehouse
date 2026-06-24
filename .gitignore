@@ -1,0 +1,16 @@
+# Arduino build and IDE files
+**/build/
+.theia/
+*.bin
+*.elf
+*.hex
+*.map
+
+# Python virtual environments and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/

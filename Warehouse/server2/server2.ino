@@ -109,9 +109,6 @@ String getBoxType(String boxTag) {
 WebServer server(80);
 WebSocketsServer webSocket(81);
 
-int countPendingForRack(String rack) {
-  return 0; // pendingPlacements feature removed to fix memory leaks
-}
 
 int getRackAvailableCapacity(String rack) {
   if (rack == "RackA") return inventory.rackACapacity - inventory.rackA;
@@ -507,8 +504,7 @@ void handleBoxPlacement() {
   String rack = doc["rack"] | "Unknown";
   String box = doc["box"] | "Unknown";
   
-  int pending = countPendingForRack(rack);
-  if (getRackAvailableCapacity(rack) <= pending) {
+  if (getRackAvailableCapacity(rack) <= 0) {
     server.send(429, "application/json", "{\"error\":\"rack_full\"}");
     return;
   }
@@ -1188,7 +1184,15 @@ void serveInventoryPage() {
       html.replace("%RACKA_PERCENT%", 
         String((inventory.rackA * 100) / inventory.rackACapacity));
       
-      // Similar replacements for rackB and rackC
+      html.replace("%RACKB_COUNT%", String(inventory.rackB));
+      html.replace("%RACKB_CAPACITY%", String(inventory.rackBCapacity));
+      html.replace("%RACKB_PERCENT%", 
+        String((inventory.rackB * 100) / inventory.rackBCapacity));
+      
+      html.replace("%RACKC_COUNT%", String(inventory.rackC));
+      html.replace("%RACKC_CAPACITY%", String(inventory.rackCCapacity));
+      html.replace("%RACKC_PERCENT%", 
+        String((inventory.rackC * 100) / inventory.rackCCapacity));
 
       server.send(200, "text/html", html);
 }
